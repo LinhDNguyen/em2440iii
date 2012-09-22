@@ -13,7 +13,6 @@
 *.o
 *.o.*
 *.a
-*.s
 *.ko
 *.so
 *.so.dbg
@@ -25,10 +24,6 @@
 modules.builtin
 *.elf
 *.bin
-*.gz
-*.bz2
-*.lzma
-*.patch
 *.gcno
 
 #
