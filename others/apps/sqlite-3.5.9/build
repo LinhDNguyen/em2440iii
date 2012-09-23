@@ -1,0 +1,22 @@
+#!/bin/bash
+
+###############################################################
+##                                                           ##
+##                          黄健移植制作	             ##
+##                                                           ##
+###############################################################
+
+./configure --host=arm-linux --prefix=/opt/EmbedSky/sqlite-3.5.9/_install --disable-tcl
+make
+make install
+
+cd _install/lib/
+arm-linux-strip libsqlite3.so.0.8.6
+cp -rf * /opt/EmbedSky/4.3.3/arm-none-linux-gnueabi/libc/armv4t/lib
+cp -f ../include/* /opt/EmbedSky/4.3.3/arm-none-linux-gnueabi/libc/usr/include
+
+cd ../../sqlite_test
+make
+mv -f sqlite_test ../_install/bin/
+
+cd ..
