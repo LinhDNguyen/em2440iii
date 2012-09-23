@@ -208,7 +208,7 @@
 /* this must be included AFTER the definition of CONFIG_COMMANDS (if any) */
 #include <cmd_confdefs.h>
 
-#define CONFIG_BOOTDELAY		0
+#define CONFIG_BOOTDELAY		3
 
 #if CONFIG_128MB_SDRAM
 #define CONFIG_BOOTARGS		"noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0 mem=128M"
@@ -217,8 +217,8 @@
 #endif
 #define CONFIG_ETHADDR			0a:1b:2c:3d:4e:5f
 #define CONFIG_NETMASK			255.255.255.0
-#define CONFIG_IPADDR			192.168.1.6
-#define CONFIG_SERVERIP			192.168.1.8
+#define CONFIG_IPADDR			192.168.1.116
+#define CONFIG_SERVERIP			192.168.1.119
 /*#define CONFIG_BOOTFILE		"elinos-lart" */
 #define CONFIG_BOOTCOMMAND		"nboot 0x32000000 kernel; bootm 0x32000000"
 
