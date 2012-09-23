@@ -41,12 +41,13 @@
 
 static void cpm2_cascade(unsigned int irq, struct irq_desc *desc)
 {
+	struct irq_chip *chip = irq_desc_get_chip(desc);
 	int cascade_irq;
 
 	while ((cascade_irq = cpm2_get_irq()) >= 0)
 		generic_handle_irq(cascade_irq);
 
-	desc->chip->eoi(irq);
+	chip->irq_eoi(&desc->irq_data);
 }
 
 #endif /* CONFIG_CPM2 */
@@ -91,7 +92,7 @@ static void __init sbc8560_pic_init(void)
 
 	cpm2_pic_init(np);
 	of_node_put(np);
-	set_irq_chained_handler(irq, cpm2_cascade);
+	irq_set_chained_handler(irq, cpm2_cascade);
 #endif
 }
 
@@ -267,6 +268,43 @@ arch_initcall(sbc8560_rtc_init);
 
 #endif	/* M48T59 */
 
+static __u8 __iomem *brstcr;
+
+static int __init sbc8560_bdrstcr_init(void)
+{
+	struct device_node *np;
+	struct resource res;
+
+	np = of_find_compatible_node(NULL, NULL, "wrs,sbc8560-brstcr");
+	if (np == NULL) {
+		printk(KERN_WARNING "sbc8560: No board specific RSTCR in DTB.\n");
+		return -ENODEV;
+	}
+
+	of_address_to_resource(np, 0, &res);
+
+	printk(KERN_INFO "sbc8560: Found BRSTCR at i/o 0x%x\n", res.start);
+
+	brstcr = ioremap(res.start, resource_size(&res));
+	if(!brstcr)
+		printk(KERN_WARNING "sbc8560: ioremap of brstcr failed.\n");
+
+	of_node_put(np);
+
+	return 0;
+}
+
+arch_initcall(sbc8560_bdrstcr_init);
+
+void sbc8560_rstcr_restart(char * cmd)
+{
+	local_irq_disable();
+	if(brstcr)
+		clrbits8(brstcr, 0x80);
+
+	while(1);
+}
+
 define_machine(sbc8560) {
 	.name			= "SBC8560",
 	.probe			= sbc8560_probe,
@@ -274,7 +312,7 @@ define_machine(sbc8560) {
 	.init_IRQ		= sbc8560_pic_init,
 	.show_cpuinfo		= sbc8560_show_cpuinfo,
 	.get_irq		= mpic_get_irq,
-	.restart		= fsl_rstcr_restart,
+	.restart		= sbc8560_rstcr_restart,
 	.calibrate_decr		= generic_calibrate_decr,
 	.progress		= udbg_progress,
 };

@@ -91,7 +91,7 @@
 #define DEBUG_PLAY_REC	0
 
 #if DEBUG_CALLS
-#define snd_als300_dbgcalls(format, args...) printk(format, ##args)
+#define snd_als300_dbgcalls(format, args...) printk(KERN_DEBUG format, ##args)
 #define snd_als300_dbgcallenter() printk(KERN_ERR "--> %s\n", __func__)
 #define snd_als300_dbgcallleave() printk(KERN_ERR "<-- %s\n", __func__)
 #else
@@ -145,7 +145,7 @@ struct snd_als300_substream_data {
 	int block_counter_register;
 };
 
-static struct pci_device_id snd_als300_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_als300_ids) = {
 	{ 0x4005, 0x0300, PCI_ANY_ID, PCI_ANY_ID, 0, 0, DEVICE_ALS300 },
 	{ 0x4005, 0x0308, PCI_ANY_ID, PCI_ANY_ID, 0, 0, DEVICE_ALS300_PLUS },
 	{ 0, }
@@ -689,8 +689,8 @@ static int __devinit snd_als300_create(struct snd_card *card,
 	if ((err = pci_enable_device(pci)) < 0)
 		return err;
 
-	if (pci_set_dma_mask(pci, DMA_28BIT_MASK) < 0 ||
-		pci_set_consistent_dma_mask(pci, DMA_28BIT_MASK) < 0) {
+	if (pci_set_dma_mask(pci, DMA_BIT_MASK(28)) < 0 ||
+		pci_set_consistent_dma_mask(pci, DMA_BIT_MASK(28)) < 0) {
 		printk(KERN_ERR "error setting 28bit DMA mask\n");
 		pci_disable_device(pci);
 		return -ENXIO;
@@ -722,7 +722,7 @@ static int __devinit snd_als300_create(struct snd_card *card,
 		irq_handler = snd_als300_interrupt;
 
 	if (request_irq(pci->irq, irq_handler, IRQF_SHARED,
-			card->shortname, chip)) {
+			KBUILD_MODNAME, chip)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_als300_free(chip);
 		return -EBUSY;
@@ -812,10 +812,10 @@ static int __devinit snd_als300_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
 
-	if (card == NULL)
-		return -ENOMEM;
+	if (err < 0)
+		return err;
 
 	chip_type = pci_id->driver_data;
 
@@ -846,7 +846,7 @@ static int __devinit snd_als300_probe(struct pci_dev *pci,
 }
 
 static struct pci_driver driver = {
-	.name = "ALS300",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_als300_ids,
 	.probe = snd_als300_probe,
 	.remove = __devexit_p(snd_als300_remove),

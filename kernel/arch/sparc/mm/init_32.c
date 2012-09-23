@@ -24,6 +24,7 @@
 #include <linux/bootmem.h>
 #include <linux/pagemap.h>
 #include <linux/poison.h>
+#include <linux/gfp.h>
 
 #include <asm/sections.h>
 #include <asm/system.h>
@@ -34,8 +35,7 @@
 #include <asm/pgalloc.h>	/* bug in asm-generic/tlb.h: check_pgt_cache */
 #include <asm/tlb.h>
 #include <asm/prom.h>
-
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
+#include <asm/leon.h>
 
 unsigned long *sparc_valid_addr_bitmap;
 EXPORT_SYMBOL(sparc_valid_addr_bitmap);
@@ -73,10 +73,10 @@ void __init kmap_init(void)
 	kmap_prot = __pgprot(SRMMU_ET_PTE | SRMMU_PRIV | SRMMU_CACHE);
 }
 
-void show_mem(void)
+void show_mem(unsigned int filter)
 {
 	printk("Mem-info:\n");
-	show_free_areas();
+	show_free_areas(filter);
 	printk("Free swap:       %6ldkB\n",
 	       nr_swap_pages << (PAGE_SHIFT-10));
 	printk("%ld pages of RAM\n", totalram_pages);
@@ -326,6 +326,9 @@ void __init paging_init(void)
 		sparc_unmapped_base = 0xe0000000;
 		BTFIXUPSET_SETHI(sparc_unmapped_base, 0xe0000000);
 		break;
+	case sparc_leon:
+		leon_init();
+		/* fall through */
 	case sun4m:
 	case sun4d:
 		srmmu_paging_init();
@@ -337,7 +340,7 @@ void __init paging_init(void)
 		prom_printf("paging_init: sparc_cpu_model = %d\n", sparc_cpu_model);
 		prom_printf("paging_init: Halting...\n");
 		prom_halt();
-	};
+	}
 
 	/* Initialize the protection map with non-constant, MMU dependent values. */
 	protection_map[0] = PAGE_NONE;
@@ -358,6 +361,7 @@ void __init paging_init(void)
 	protection_map[15] = PAGE_SHARED;
 	btfixup();
 	prom_build_devicetree();
+	of_fill_in_cpu_data();
 	device_scan();
 }
 
@@ -467,7 +471,7 @@ void __init mem_init(void)
 			reservedpages++;
 
 	printk(KERN_INFO "Memory: %luk/%luk available (%dk kernel code, %dk reserved, %dk data, %dk init, %ldk highmem)\n",
-	       (unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
+	       nr_free_pages() << (PAGE_SHIFT-10),
 	       num_physpages << (PAGE_SHIFT - 10),
 	       codepages << (PAGE_SHIFT-10),
 	       reservedpages << (PAGE_SHIFT - 10),

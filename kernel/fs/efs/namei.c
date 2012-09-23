@@ -8,7 +8,6 @@
 
 #include <linux/buffer_head.h>
 #include <linux/string.h>
-#include <linux/smp_lock.h>
 #include <linux/exportfs.h>
 #include "efs.h"
 
@@ -61,18 +60,11 @@ static efs_ino_t efs_find_entry(struct inode *inode, const char *name, int len) 
 
 struct dentry *efs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd) {
 	efs_ino_t inodenum;
-	struct inode * inode = NULL;
+	struct inode *inode = NULL;
 
-	lock_kernel();
 	inodenum = efs_find_entry(dir, dentry->d_name.name, dentry->d_name.len);
-	if (inodenum) {
+	if (inodenum)
 		inode = efs_iget(dir->i_sb, inodenum);
-		if (IS_ERR(inode)) {
-			unlock_kernel();
-			return ERR_CAST(inode);
-		}
-	}
-	unlock_kernel();
 
 	return d_splice_alias(inode, dentry);
 }
@@ -115,11 +107,9 @@ struct dentry *efs_get_parent(struct dentry *child)
 	struct dentry *parent = ERR_PTR(-ENOENT);
 	efs_ino_t ino;
 
-	lock_kernel();
 	ino = efs_find_entry(child->d_inode, "..", 2);
 	if (ino)
 		parent = d_obtain_alias(efs_iget(child->d_inode->i_sb, ino));
-	unlock_kernel();
 
 	return parent;
 }

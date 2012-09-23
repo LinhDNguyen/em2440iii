@@ -17,6 +17,7 @@
 
 #include <linux/irq.h>
 #include <linux/interrupt.h>
+#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
@@ -25,10 +26,11 @@
 
 #include <asm/cacheflush.h>
 #include <asm/pgalloc.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/io.h>
 #include <asm/mmu_context.h>
 #include <asm/m32r.h>
+#include <asm/tlbflush.h>
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 /* Data structures and variables                                             */
@@ -60,33 +62,22 @@ extern spinlock_t ipi_lock[];
 /* Function Prototypes                                                       */
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 
-void smp_send_reschedule(int);
 void smp_reschedule_interrupt(void);
-
-void smp_flush_cache_all(void);
 void smp_flush_cache_all_interrupt(void);
 
-void smp_flush_tlb_all(void);
 static void flush_tlb_all_ipi(void *);
-
-void smp_flush_tlb_mm(struct mm_struct *);
-void smp_flush_tlb_range(struct vm_area_struct *, unsigned long, \
-	unsigned long);
-void smp_flush_tlb_page(struct vm_area_struct *, unsigned long);
 static void flush_tlb_others(cpumask_t, struct mm_struct *,
 	struct vm_area_struct *, unsigned long);
+
 void smp_invalidate_interrupt(void);
 
-void smp_send_stop(void);
 static void stop_this_cpu(void *);
 
-void smp_send_timer(void);
 void smp_ipi_timer_interrupt(struct pt_regs *);
 void smp_local_timer_interrupt(void);
 
 static void send_IPI_allbutself(int, int);
-static void send_IPI_mask(cpumask_t, int, int);
-unsigned long send_IPI_mask_phys(cpumask_t, int, int);
+static void send_IPI_mask(const struct cpumask *, int, int);
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
 /* Rescheduling request Routines                                             */
@@ -113,7 +104,7 @@ unsigned long send_IPI_mask_phys(cpumask_t, int, int);
 void smp_send_reschedule(int cpu_id)
 {
 	WARN_ON(cpu_is_offline(cpu_id));
-	send_IPI_mask(cpumask_of_cpu(cpu_id), RESCHEDULE_IPI, 1);
+	send_IPI_mask(cpumask_of(cpu_id), RESCHEDULE_IPI, 1);
 }
 
 /*==========================================================================*
@@ -121,8 +112,6 @@ void smp_send_reschedule(int cpu_id)
  *
  * Description:  This routine executes on CPU which received
  *               'RESCHEDULE_IPI'.
- *               Rescheduling is processed at the exit of interrupt
- *               operation.
  *
  * Born on Date: 2002.02.05
  *
@@ -137,7 +126,7 @@ void smp_send_reschedule(int cpu_id)
  *==========================================================================*/
 void smp_reschedule_interrupt(void)
 {
-	/* nothing to do */
+	scheduler_ipi();
 }
 
 /*==========================================================================*
@@ -163,12 +152,12 @@ void smp_flush_cache_all(void)
 	unsigned long *mask;
 
 	preempt_disable();
-	cpumask = cpu_online_map;
-	cpu_clear(smp_processor_id(), cpumask);
+	cpumask_copy(&cpumask, cpu_online_mask);
+	cpumask_clear_cpu(smp_processor_id(), &cpumask);
 	spin_lock(&flushcache_lock);
-	mask=cpus_addr(cpumask);
+	mask=cpumask_bits(&cpumask);
 	atomic_set_mask(*mask, (atomic_t *)&flushcache_cpumask);
-	send_IPI_mask(cpumask, INVALIDATE_CACHE_IPI, 0);
+	send_IPI_mask(&cpumask, INVALIDATE_CACHE_IPI, 0);
 	_flush_cache_copyback_all();
 	while (flushcache_cpumask)
 		mb();
@@ -264,8 +253,8 @@ void smp_flush_tlb_mm(struct mm_struct *mm)
 	preempt_disable();
 	cpu_id = smp_processor_id();
 	mmc = &mm->context[cpu_id];
-	cpu_mask = mm->cpu_vm_mask;
-	cpu_clear(cpu_id, cpu_mask);
+	cpumask_copy(&cpu_mask, mm_cpumask(mm));
+	cpumask_clear_cpu(cpu_id, &cpu_mask);
 
 	if (*mmc != NO_CONTEXT) {
 		local_irq_save(flags);
@@ -273,10 +262,10 @@ void smp_flush_tlb_mm(struct mm_struct *mm)
 		if (mm == current->mm)
 			activate_context(mm);
 		else
-			cpu_clear(cpu_id, mm->cpu_vm_mask);
+			cpumask_clear_cpu(cpu_id, mm_cpumask(mm));
 		local_irq_restore(flags);
 	}
-	if (!cpus_empty(cpu_mask))
+	if (!cpumask_empty(&cpu_mask))
 		flush_tlb_others(cpu_mask, mm, NULL, FLUSH_ALL);
 
 	preempt_enable();
@@ -334,8 +323,8 @@ void smp_flush_tlb_page(struct vm_area_struct *vma, unsigned long va)
 	preempt_disable();
 	cpu_id = smp_processor_id();
 	mmc = &mm->context[cpu_id];
-	cpu_mask = mm->cpu_vm_mask;
-	cpu_clear(cpu_id, cpu_mask);
+	cpumask_copy(&cpu_mask, mm_cpumask(mm));
+	cpumask_clear_cpu(cpu_id, &cpu_mask);
 
 #ifdef DEBUG_SMP
 	if (!mm)
@@ -349,7 +338,7 @@ void smp_flush_tlb_page(struct vm_area_struct *vma, unsigned long va)
 		__flush_tlb_page(va);
 		local_irq_restore(flags);
 	}
-	if (!cpus_empty(cpu_mask))
+	if (!cpumask_empty(&cpu_mask))
 		flush_tlb_others(cpu_mask, mm, vma, va);
 
 	preempt_enable();
@@ -396,14 +385,14 @@ static void flush_tlb_others(cpumask_t cpumask, struct mm_struct *mm,
 	 * - current CPU must not be in mask
 	 * - mask must exist :)
 	 */
-	BUG_ON(cpus_empty(cpumask));
+	BUG_ON(cpumask_empty(&cpumask));
 
-	BUG_ON(cpu_isset(smp_processor_id(), cpumask));
+	BUG_ON(cpumask_test_cpu(smp_processor_id(), &cpumask));
 	BUG_ON(!mm);
 
 	/* If a CPU which we ran on has gone down, OK. */
-	cpus_and(cpumask, cpumask, cpu_online_map);
-	if (cpus_empty(cpumask))
+	cpumask_and(&cpumask, &cpumask, cpu_online_mask);
+	if (cpumask_empty(&cpumask))
 		return;
 
 	/*
@@ -417,16 +406,16 @@ static void flush_tlb_others(cpumask_t cpumask, struct mm_struct *mm,
 	flush_mm = mm;
 	flush_vma = vma;
 	flush_va = va;
-	mask=cpus_addr(cpumask);
+	mask=cpumask_bits(&cpumask);
 	atomic_set_mask(*mask, (atomic_t *)&flush_cpumask);
 
 	/*
 	 * We have to send the IPI only to
 	 * CPUs affected.
 	 */
-	send_IPI_mask(cpumask, INVALIDATE_TLB_IPI, 0);
+	send_IPI_mask(&cpumask, INVALIDATE_TLB_IPI, 0);
 
-	while (!cpus_empty(flush_cpumask)) {
+	while (!cpumask_empty((cpumask_t*)&flush_cpumask)) {
 		/* nothing. lockup detection does not belong here */
 		mb();
 	}
@@ -461,7 +450,7 @@ void smp_invalidate_interrupt(void)
 	int cpu_id = smp_processor_id();
 	unsigned long *mmc = &flush_mm->context[cpu_id];
 
-	if (!cpu_isset(cpu_id, flush_cpumask))
+	if (!cpumask_test_cpu(cpu_id, &flush_cpumask))
 		return;
 
 	if (flush_va == FLUSH_ALL) {
@@ -469,7 +458,7 @@ void smp_invalidate_interrupt(void)
 		if (flush_mm == current->active_mm)
 			activate_context(flush_mm);
 		else
-			cpu_clear(cpu_id, flush_mm->cpu_vm_mask);
+			cpumask_clear_cpu(cpu_id, mm_cpumask(flush_mm));
 	} else {
 		unsigned long va = flush_va;
 
@@ -479,7 +468,7 @@ void smp_invalidate_interrupt(void)
 			__flush_tlb_page(va);
 		}
 	}
-	cpu_clear(cpu_id, flush_cpumask);
+	cpumask_clear_cpu(cpu_id, (cpumask_t*)&flush_cpumask);
 }
 
 /*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*/
@@ -531,7 +520,7 @@ static void stop_this_cpu(void *dummy)
 	/*
 	 * Remove this CPU:
 	 */
-	cpu_clear(cpu_id, cpu_online_map);
+	set_cpu_online(cpu_id, false);
 
 	/*
 	 * PSW IE = 1;
@@ -546,14 +535,14 @@ static void stop_this_cpu(void *dummy)
 	for ( ; ; );
 }
 
-void arch_send_call_function_ipi(cpumask_t mask)
+void arch_send_call_function_ipi_mask(const struct cpumask *mask)
 {
 	send_IPI_mask(mask, CALL_FUNCTION_IPI, 0);
 }
 
 void arch_send_call_function_single_ipi(int cpu)
 {
-	send_IPI_mask(cpumask_of_cpu(cpu), CALL_FUNC_SINGLE_IPI, 0);
+	send_IPI_mask(cpumask_of(cpu), CALL_FUNC_SINGLE_IPI, 0);
 }
 
 /*==========================================================================*
@@ -726,10 +715,10 @@ static void send_IPI_allbutself(int ipi_num, int try)
 {
 	cpumask_t cpumask;
 
-	cpumask = cpu_online_map;
-	cpu_clear(smp_processor_id(), cpumask);
+	cpumask_copy(&cpumask, cpu_online_mask);
+	cpumask_clear_cpu(smp_processor_id(), &cpumask);
 
-	send_IPI_mask(cpumask, ipi_num, try);
+	send_IPI_mask(&cpumask, ipi_num, try);
 }
 
 /*==========================================================================*
@@ -752,7 +741,7 @@ static void send_IPI_allbutself(int ipi_num, int try)
  * ---------- --- --------------------------------------------------------
  *
  *==========================================================================*/
-static void send_IPI_mask(cpumask_t cpumask, int ipi_num, int try)
+static void send_IPI_mask(const struct cpumask *cpumask, int ipi_num, int try)
 {
 	cpumask_t physid_mask, tmp;
 	int cpu_id, phys_id;
@@ -761,16 +750,16 @@ static void send_IPI_mask(cpumask_t cpumask, int ipi_num, int try)
 	if (num_cpus <= 1)	/* NO MP */
 		return;
 
-	cpus_and(tmp, cpumask, cpu_online_map);
-	BUG_ON(!cpus_equal(cpumask, tmp));
+	cpumask_and(&tmp, cpumask, cpu_online_mask);
+	BUG_ON(!cpumask_equal(cpumask, &tmp));
 
-	physid_mask = CPU_MASK_NONE;
-	for_each_cpu_mask(cpu_id, cpumask){
+	cpumask_clear(&physid_mask);
+	for_each_cpu(cpu_id, cpumask) {
 		if ((phys_id = cpu_to_physid(cpu_id)) != -1)
-			cpu_set(phys_id, physid_mask);
+			cpumask_set_cpu(phys_id, &physid_mask);
 	}
 
-	send_IPI_mask_phys(physid_mask, ipi_num, try);
+	send_IPI_mask_phys(&physid_mask, ipi_num, try);
 }
 
 /*==========================================================================*
@@ -793,19 +782,19 @@ static void send_IPI_mask(cpumask_t cpumask, int ipi_num, int try)
  * ---------- --- --------------------------------------------------------
  *
  *==========================================================================*/
-unsigned long send_IPI_mask_phys(cpumask_t physid_mask, int ipi_num,
+unsigned long send_IPI_mask_phys(const cpumask_t *physid_mask, int ipi_num,
 	int try)
 {
 	spinlock_t *ipilock;
 	volatile unsigned long *ipicr_addr;
 	unsigned long ipicr_val;
 	unsigned long my_physid_mask;
-	unsigned long mask = cpus_addr(physid_mask)[0];
+	unsigned long mask = cpumask_bits(physid_mask)[0];
 
 
 	if (mask & ~physids_coerce(phys_cpu_present_map))
 		BUG();
-	if (ipi_num >= NR_IPIS)
+	if (ipi_num >= NR_IPIS || ipi_num < 0)
 		BUG();
 
 	mask <<= IPI_SHIFT;

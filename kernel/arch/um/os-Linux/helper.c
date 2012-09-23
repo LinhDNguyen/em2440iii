@@ -15,7 +15,6 @@
 #include "os.h"
 #include "um_malloc.h"
 #include "user.h"
-#include <linux/limits.h>
 
 struct helper_data {
 	void (*pre_exec)(void*);
@@ -29,14 +28,14 @@ static int helper_child(void *arg)
 {
 	struct helper_data *data = arg;
 	char **argv = data->argv;
-	int err;
+	int err, ret;
 
 	if (data->pre_exec != NULL)
 		(*data->pre_exec)(data->pre_data);
 	err = execvp_noalloc(data->buf, argv[0], argv);
 
 	/* If the exec succeeds, we don't get here */
-	write(data->fd, &err, sizeof(err));
+	CATCH_EINTR(ret = write(data->fd, &err, sizeof(err)));
 
 	return 0;
 }

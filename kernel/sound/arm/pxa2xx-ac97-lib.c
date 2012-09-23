@@ -21,9 +21,7 @@
 #include <sound/pxa2xx-lib.h>
 
 #include <asm/irq.h>
-#include <mach/hardware.h>
 #include <mach/regs-ac97.h>
-#include <mach/pxa2xx-gpio.h>
 #include <mach/audio.h>
 
 static DEFINE_MUTEX(car_mutex);
@@ -31,6 +29,9 @@ static DECLARE_WAIT_QUEUE_HEAD(gsr_wq);
 static volatile long gsr_bits;
 static struct clk *ac97_clk;
 static struct clk *ac97conf_clk;
+static int reset_gpio;
+
+extern void pxa27x_assert_ac97reset(int reset_gpio, int on);
 
 /*
  * Beware PXA27x bugs:
@@ -135,12 +136,11 @@ static inline void pxa_ac97_warm_pxa27x(void)
 {
 	gsr_bits = 0;
 
-	/* warm reset broken on Bulverde,
-	   so manually keep AC97 reset high */
-	pxa_gpio_mode(113 | GPIO_OUT | GPIO_DFLT_HIGH);
+	/* warm reset broken on Bulverde, so manually keep AC97 reset high */
+	pxa27x_assert_ac97reset(reset_gpio, 1);
 	udelay(10);
 	GCR |= GCR_WARM_RST;
-	pxa_gpio_mode(113 | GPIO_ALT_FN_2_OUT);
+	pxa27x_assert_ac97reset(reset_gpio, 0);
 	udelay(500);
 }
 
@@ -199,6 +199,8 @@ static inline void pxa_ac97_cold_pxa3xx(void)
 
 bool pxa2xx_ac97_try_warm_reset(struct snd_ac97 *ac97)
 {
+	unsigned long gsr;
+
 #ifdef CONFIG_PXA25x
 	if (cpu_is_pxa25x())
 		pxa_ac97_warm_pxa25x();
@@ -215,10 +217,10 @@ bool pxa2xx_ac97_try_warm_reset(struct snd_ac97 *ac97)
 	else
 #endif
 		BUG();
-
-	if (!((GSR | gsr_bits) & (GSR_PCR | GSR_SCR))) {
+	gsr = GSR | gsr_bits;
+	if (!(gsr & (GSR_PCR | GSR_SCR))) {
 		printk(KERN_INFO "%s: warm reset timeout (GSR=%#lx)\n",
-				 __func__, gsr_bits);
+				 __func__, gsr);
 
 		return false;
 	}
@@ -229,6 +231,8 @@ EXPORT_SYMBOL_GPL(pxa2xx_ac97_try_warm_reset);
 
 bool pxa2xx_ac97_try_cold_reset(struct snd_ac97 *ac97)
 {
+	unsigned long gsr;
+
 #ifdef CONFIG_PXA25x
 	if (cpu_is_pxa25x())
 		pxa_ac97_cold_pxa25x();
@@ -246,9 +250,10 @@ bool pxa2xx_ac97_try_cold_reset(struct snd_ac97 *ac97)
 #endif
 		BUG();
 
-	if (!((GSR | gsr_bits) & (GSR_PCR | GSR_SCR))) {
+	gsr = GSR | gsr_bits;
+	if (!(gsr & (GSR_PCR | GSR_SCR))) {
 		printk(KERN_INFO "%s: cold reset timeout (GSR=%#lx)\n",
-				 __func__, gsr_bits);
+				 __func__, gsr);
 
 		return false;
 	}
@@ -301,16 +306,6 @@ EXPORT_SYMBOL_GPL(pxa2xx_ac97_hw_suspend);
 
 int pxa2xx_ac97_hw_resume(void)
 {
-	if (cpu_is_pxa25x() || cpu_is_pxa27x()) {
-		pxa_gpio_mode(GPIO31_SYNC_AC97_MD);
-		pxa_gpio_mode(GPIO30_SDATA_OUT_AC97_MD);
-		pxa_gpio_mode(GPIO28_BITCLK_AC97_MD);
-		pxa_gpio_mode(GPIO29_SDATA_IN_AC97_MD);
-	}
-	if (cpu_is_pxa27x()) {
-		/* Use GPIO 113 as AC97 Reset on Bulverde */
-		pxa_gpio_mode(113 | GPIO_ALT_FN_2_OUT);
-	}
 	clk_enable(ac97_clk);
 	return 0;
 }
@@ -320,17 +315,31 @@ EXPORT_SYMBOL_GPL(pxa2xx_ac97_hw_resume);
 int __devinit pxa2xx_ac97_hw_probe(struct platform_device *dev)
 {
 	int ret;
+	pxa2xx_audio_ops_t *pdata = dev->dev.platform_data;
 
-	if (cpu_is_pxa25x() || cpu_is_pxa27x()) {
-		pxa_gpio_mode(GPIO31_SYNC_AC97_MD);
-		pxa_gpio_mode(GPIO30_SDATA_OUT_AC97_MD);
-		pxa_gpio_mode(GPIO28_BITCLK_AC97_MD);
-		pxa_gpio_mode(GPIO29_SDATA_IN_AC97_MD);
+	if (pdata) {
+		switch (pdata->reset_gpio) {
+		case 95:
+		case 113:
+			reset_gpio = pdata->reset_gpio;
+			break;
+		case 0:
+			reset_gpio = 113;
+			break;
+		case -1:
+			break;
+		default:
+			dev_err(&dev->dev, "Invalid reset GPIO %d\n",
+				pdata->reset_gpio);
+		}
+	} else {
+		if (cpu_is_pxa27x())
+			reset_gpio = 113;
 	}
 
 	if (cpu_is_pxa27x()) {
 		/* Use GPIO 113 as AC97 Reset on Bulverde */
-		pxa_gpio_mode(113 | GPIO_ALT_FN_2_OUT);
+		pxa27x_assert_ac97reset(reset_gpio, 0);
 		ac97conf_clk = clk_get(&dev->dev, "AC97CONFCLK");
 		if (IS_ERR(ac97conf_clk)) {
 			ret = PTR_ERR(ac97conf_clk);

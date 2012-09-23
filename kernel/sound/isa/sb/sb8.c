@@ -22,7 +22,6 @@
 #include <linux/init.h>
 #include <linux/err.h>
 #include <linux/isa.h>
-#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/moduleparam.h>
 #include <sound/core.h>
@@ -73,7 +72,7 @@ static irqreturn_t snd_sb8_interrupt(int irq, void *dev_id)
 
 static void snd_sb8_free(struct snd_card *card)
 {
-	struct snd_sb8 *acard = (struct snd_sb8 *)card->private_data;
+	struct snd_sb8 *acard = card->private_data;
 
 	if (acard == NULL)
 		return;
@@ -103,10 +102,10 @@ static int __devinit snd_sb8_probe(struct device *pdev, unsigned int dev)
 	struct snd_opl3 *opl3;
 	int err;
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE,
-			    sizeof(struct snd_sb8));
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE,
+			      sizeof(struct snd_sb8), &card);
+	if (err < 0)
+		return err;
 	acard = card->private_data;
 	card->private_free = snd_sb8_free;
 

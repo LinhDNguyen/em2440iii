@@ -60,7 +60,7 @@ static void at91_rtc_decodetime(unsigned int timereg, unsigned int calreg,
 	/*
 	 * The Calendar Alarm register does not have a field for
 	 * the year - so these will return an invalid value.  When an
-	 * alarm is set, at91_alarm_year wille store the current year.
+	 * alarm is set, at91_alarm_year will store the current year.
 	 */
 	tm->tm_year  = bcd2bin(date & AT91_RTC_CENT) * 100;	/* century */
 	tm->tm_year += bcd2bin((date & AT91_RTC_YEAR) >> 8);	/* year */
@@ -183,40 +183,18 @@ static int at91_rtc_setalarm(struct device *dev, struct rtc_wkalrm *alrm)
 	return 0;
 }
 
-/*
- * Handle commands from user-space
- */
-static int at91_rtc_ioctl(struct device *dev, unsigned int cmd,
-			unsigned long arg)
+static int at91_rtc_alarm_irq_enable(struct device *dev, unsigned int enabled)
 {
-	int ret = 0;
+	pr_debug("%s(): cmd=%08x\n", __func__, enabled);
 
-	pr_debug("%s(): cmd=%08x, arg=%08lx.\n", __func__, cmd, arg);
-
-	/* important:  scrub old status before enabling IRQs */
-	switch (cmd) {
-	case RTC_AIE_OFF:	/* alarm off */
-		at91_sys_write(AT91_RTC_IDR, AT91_RTC_ALARM);
-		break;
-	case RTC_AIE_ON:	/* alarm on */
+	if (enabled) {
 		at91_sys_write(AT91_RTC_SCCR, AT91_RTC_ALARM);
 		at91_sys_write(AT91_RTC_IER, AT91_RTC_ALARM);
-		break;
-	case RTC_UIE_OFF:	/* update off */
-		at91_sys_write(AT91_RTC_IDR, AT91_RTC_SECEV);
-		break;
-	case RTC_UIE_ON:	/* update on */
-		at91_sys_write(AT91_RTC_SCCR, AT91_RTC_SECEV);
-		at91_sys_write(AT91_RTC_IER, AT91_RTC_SECEV);
-		break;
-	default:
-		ret = -ENOIOCTLCMD;
-		break;
-	}
+	} else
+		at91_sys_write(AT91_RTC_IDR, AT91_RTC_ALARM);
 
-	return ret;
+	return 0;
 }
-
 /*
  * Provide additional RTC information in /proc/driver/rtc
  */
@@ -264,12 +242,12 @@ static irqreturn_t at91_rtc_interrupt(int irq, void *dev_id)
 }
 
 static const struct rtc_class_ops at91_rtc_ops = {
-	.ioctl		= at91_rtc_ioctl,
 	.read_time	= at91_rtc_readtime,
 	.set_time	= at91_rtc_settime,
 	.read_alarm	= at91_rtc_readalarm,
 	.set_alarm	= at91_rtc_setalarm,
 	.proc		= at91_rtc_proc,
+	.alarm_irq_enable = at91_rtc_alarm_irq_enable,
 };
 
 /*
@@ -289,7 +267,7 @@ static int __init at91_rtc_probe(struct platform_device *pdev)
 					AT91_RTC_CALEV);
 
 	ret = request_irq(AT91_ID_SYS, at91_rtc_interrupt,
-				IRQF_DISABLED | IRQF_SHARED,
+				IRQF_SHARED,
 				"at91_rtc", pdev);
 	if (ret) {
 		printk(KERN_ERR "at91_rtc: IRQ %d already in use.\n",
@@ -340,7 +318,7 @@ static int __exit at91_rtc_remove(struct platform_device *pdev)
 
 static u32 at91_rtc_imr;
 
-static int at91_rtc_suspend(struct platform_device *pdev, pm_message_t state)
+static int at91_rtc_suspend(struct device *dev)
 {
 	/* this IRQ is shared with DBGU and other hardware which isn't
 	 * necessarily doing PM like we are...
@@ -348,7 +326,7 @@ static int at91_rtc_suspend(struct platform_device *pdev, pm_message_t state)
 	at91_rtc_imr = at91_sys_read(AT91_RTC_IMR)
 			& (AT91_RTC_ALARM|AT91_RTC_SECEV);
 	if (at91_rtc_imr) {
-		if (device_may_wakeup(&pdev->dev))
+		if (device_may_wakeup(dev))
 			enable_irq_wake(AT91_ID_SYS);
 		else
 			at91_sys_write(AT91_RTC_IDR, at91_rtc_imr);
@@ -356,28 +334,34 @@ static int at91_rtc_suspend(struct platform_device *pdev, pm_message_t state)
 	return 0;
 }
 
-static int at91_rtc_resume(struct platform_device *pdev)
+static int at91_rtc_resume(struct device *dev)
 {
 	if (at91_rtc_imr) {
-		if (device_may_wakeup(&pdev->dev))
+		if (device_may_wakeup(dev))
 			disable_irq_wake(AT91_ID_SYS);
 		else
 			at91_sys_write(AT91_RTC_IER, at91_rtc_imr);
 	}
 	return 0;
 }
+
+static const struct dev_pm_ops at91_rtc_pm = {
+	.suspend =	at91_rtc_suspend,
+	.resume =	at91_rtc_resume,
+};
+
+#define at91_rtc_pm_ptr	&at91_rtc_pm
+
 #else
-#define at91_rtc_suspend NULL
-#define at91_rtc_resume  NULL
+#define at91_rtc_pm_ptr	NULL
 #endif
 
 static struct platform_driver at91_rtc_driver = {
 	.remove		= __exit_p(at91_rtc_remove),
-	.suspend	= at91_rtc_suspend,
-	.resume		= at91_rtc_resume,
 	.driver		= {
 		.name	= "at91_rtc",
 		.owner	= THIS_MODULE,
+		.pm	= at91_rtc_pm_ptr,
 	},
 };
 

@@ -24,13 +24,13 @@
 #include <linux/clk.h>
 #include <linux/io.h>
 
-#include <mach/common.h>
-#include <mach/clock.h>
-#include <mach/sram.h>
+#include <plat/common.h>
+#include <plat/clock.h>
+#include <plat/sram.h>
 
-#include "prm.h"
+#include "prm2xxx_3xxx.h"
 #include "clock.h"
-#include <mach/sdrc.h>
+#include <plat/sdrc.h>
 #include "sdrc.h"
 
 /* Memory timing, DLL mode flags */
@@ -99,7 +99,14 @@ u32 omap2xxx_sdrc_reprogram(u32 level, u32 force)
 	m_type = omap2xxx_sdrc_get_type();
 
 	local_irq_save(flags);
-	__raw_writel(0xffff, OMAP24XX_PRCM_VOLTSETUP);
+	/*
+	 * XXX These calls should be abstracted out through a
+	 * prm2xxx.c function
+	 */
+	if (cpu_is_omap2420())
+		__raw_writel(0xffff, OMAP2420_PRCM_VOLTSETUP);
+	else
+		__raw_writel(0xffff, OMAP2430_PRCM_VOLTSETUP);
 	omap2_sram_reprogram_sdrc(level, dll_ctrl, m_type);
 	curr_perf_level = level;
 	local_irq_restore(flags);

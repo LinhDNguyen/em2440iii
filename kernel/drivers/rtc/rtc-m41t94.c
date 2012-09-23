@@ -136,7 +136,7 @@ static int __devinit m41t94_probe(struct spi_device *spi)
 
 static int __devexit m41t94_remove(struct spi_device *spi)
 {
-	struct rtc_device *rtc = platform_get_drvdata(spi);
+	struct rtc_device *rtc = spi_get_drvdata(spi);
 
 	if (rtc)
 		rtc_device_unregister(rtc);
@@ -171,3 +171,4 @@ module_exit(m41t94_exit);
 MODULE_AUTHOR("Kim B. Heino <Kim.Heino@bluegiga.com>");
 MODULE_DESCRIPTION("Driver for ST M41T94 SPI RTC");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("spi:rtc-m41t94");

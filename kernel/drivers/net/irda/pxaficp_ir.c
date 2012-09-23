@@ -12,10 +12,15 @@
  * Infra-red driver (SIR/FIR) for the PXA2xx embedded microprocessor
  *
  */
+#include <linux/dma-mapping.h>
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
+#include <linux/gpio.h>
+#include <linux/slab.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/irmod.h>
@@ -37,7 +42,7 @@
 
 #define ICCR0_AME	(1 << 7)	/* Address match enable */
 #define ICCR0_TIE	(1 << 6)	/* Transmit FIFO interrupt enable */
-#define ICCR0_RIE	(1 << 5)	/* Recieve FIFO interrupt enable */
+#define ICCR0_RIE	(1 << 5)	/* Receive FIFO interrupt enable */
 #define ICCR0_RXE	(1 << 4)	/* Receive enable */
 #define ICCR0_TXE	(1 << 3)	/* Transmit enable */
 #define ICCR0_TUS	(1 << 2)	/* Transmit FIFO underrun select */
@@ -162,6 +167,22 @@ inline static void pxa_irda_fir_dma_tx_start(struct pxa_irda *si)
 }
 
 /*
+ * Set the IrDA communications mode.
+ */
+static void pxa_irda_set_mode(struct pxa_irda *si, int mode)
+{
+	if (si->pdata->transceiver_mode)
+		si->pdata->transceiver_mode(si->dev, mode);
+	else {
+		if (gpio_is_valid(si->pdata->gpio_pwdown))
+			gpio_set_value(si->pdata->gpio_pwdown,
+					!(mode & IR_OFF) ^
+					!si->pdata->gpio_pwdown_inverted);
+		pxa2xx_transceiver_mode(si->dev, mode);
+	}
+}
+
+/*
  * Set the IrDA communications speed.
  */
 static int pxa_irda_set_speed(struct pxa_irda *si, int speed)
@@ -187,7 +208,7 @@ static int pxa_irda_set_speed(struct pxa_irda *si, int speed)
 			pxa_irda_disable_clk(si);
 
 			/* set board transceiver to SIR mode */
-			si->pdata->transceiver_mode(si->dev, IR_SIRMODE);
+			pxa_irda_set_mode(si, IR_SIRMODE);
 
 			/* enable the STUART clock */
 			pxa_irda_enable_sirclk(si);
@@ -221,7 +242,7 @@ static int pxa_irda_set_speed(struct pxa_irda *si, int speed)
 		ICCR0 = 0;
 
 		/* set board transceiver to FIR mode */
-		si->pdata->transceiver_mode(si->dev, IR_FIRMODE);
+		pxa_irda_set_mode(si, IR_FIRMODE);
 
 		/* enable the FICP clock */
 		pxa_irda_enable_firclk(si);
@@ -464,7 +485,7 @@ static irqreturn_t pxa_irda_fir_irq(int irq, void *dev_id)
 	}
 
 	if (icsr0 & ICSR0_EIF) {
-		/* An error in FIFO occured, or there is a end of frame */
+		/* An error in FIFO occurred, or there is a end of frame */
 		pxa_irda_fir_irq_eif(si, dev, icsr0);
 	}
 
@@ -503,7 +524,7 @@ static int pxa_irda_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 			pxa_irda_set_speed(si, speed);
 		}
 		dev_kfree_skb(skb);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	netif_stop_queue(dev);
@@ -537,8 +558,7 @@ static int pxa_irda_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	dev_kfree_skb(skb);
-	dev->trans_start = jiffies;
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 static int pxa_irda_ioctl(struct net_device *dev, struct ifreq *ifreq, int cmd)
@@ -640,7 +660,7 @@ static void pxa_irda_shutdown(struct pxa_irda *si)
 	local_irq_restore(flags);
 
 	/* power off board transceiver */
-	si->pdata->transceiver_mode(si->dev, IR_OFF);
+	pxa_irda_set_mode(si, IR_OFF);
 
 	printk(KERN_DEBUG "pxa_ir: irda shutdown\n");
 }
@@ -797,6 +817,13 @@ static int pxa_irda_init_iobuf(iobuff_t *io, int size)
 	return io->head ? 0 : -ENOMEM;
 }
 
+static const struct net_device_ops pxa_irda_netdev_ops = {
+	.ndo_open		= pxa_irda_start,
+	.ndo_stop		= pxa_irda_stop,
+	.ndo_start_xmit		= pxa_irda_hard_xmit,
+	.ndo_do_ioctl		= pxa_irda_ioctl,
+};
+
 static int pxa_irda_probe(struct platform_device *pdev)
 {
 	struct net_device *dev;
@@ -819,6 +846,7 @@ static int pxa_irda_probe(struct platform_device *pdev)
 	if (!dev)
 		goto err_mem_3;
 
+	SET_NETDEV_DEV(dev, &pdev->dev);
 	si = netdev_priv(dev);
 	si->dev = &pdev->dev;
 	si->pdata = pdev->dev.platform_data;
@@ -840,15 +868,28 @@ static int pxa_irda_probe(struct platform_device *pdev)
 	if (err)
 		goto err_mem_5;
 
-	if (si->pdata->startup)
-		err = si->pdata->startup(si->dev);
-	if (err)
-		goto err_startup;
+	if (gpio_is_valid(si->pdata->gpio_pwdown)) {
+		err = gpio_request(si->pdata->gpio_pwdown, "IrDA switch");
+		if (err)
+			goto err_startup;
+		err = gpio_direction_output(si->pdata->gpio_pwdown,
+					!si->pdata->gpio_pwdown_inverted);
+		if (err) {
+			gpio_free(si->pdata->gpio_pwdown);
+			goto err_startup;
+		}
+	}
 
-	dev->hard_start_xmit	= pxa_irda_hard_xmit;
-	dev->open		= pxa_irda_start;
-	dev->stop		= pxa_irda_stop;
-	dev->do_ioctl		= pxa_irda_ioctl;
+	if (si->pdata->startup) {
+		err = si->pdata->startup(si->dev);
+		if (err)
+			goto err_startup;
+	}
+
+	if (gpio_is_valid(si->pdata->gpio_pwdown) && si->pdata->startup)
+		dev_warn(si->dev, "gpio_pwdown and startup() both defined!\n");
+
+	dev->netdev_ops = &pxa_irda_netdev_ops;
 
 	irda_init_max_qos_capabilies(&si->qos);
 
@@ -897,6 +938,8 @@ static int pxa_irda_remove(struct platform_device *_dev)
 	if (dev) {
 		struct pxa_irda *si = netdev_priv(dev);
 		unregister_netdev(dev);
+		if (gpio_is_valid(si->pdata->gpio_pwdown))
+			gpio_free(si->pdata->gpio_pwdown);
 		if (si->pdata->shutdown)
 			si->pdata->shutdown(si->dev);
 		kfree(si->tx_buff.head);

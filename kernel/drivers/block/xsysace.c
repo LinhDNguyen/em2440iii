@@ -89,10 +89,12 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/blkdev.h>
+#include <linux/mutex.h>
 #include <linux/ata.h>
 #include <linux/hdreg.h>
 #include <linux/platform_device.h>
 #if defined(CONFIG_OF)
+#include <linux/of_address.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
 #endif
@@ -212,6 +214,7 @@ struct ace_device {
 	u16 cf_id[ATA_ID_WORDS];
 };
 
+static DEFINE_MUTEX(xsysace_mutex);
 static int ace_major;
 
 /* ---------------------------------------------------------------------
@@ -390,9 +393,10 @@ static inline void ace_dump_mem(void *base, int len)
 
 static void ace_dump_regs(struct ace_device *ace)
 {
-	dev_info(ace->dev, "    ctrl:  %.8x  seccnt/cmd: %.4x      ver:%.4x\n"
-		 KERN_INFO "    status:%.8x  mpu_lba:%.8x  busmode:%4x\n"
-		 KERN_INFO "    error: %.8x  cfg_lba:%.8x  fatstat:%.4x\n",
+	dev_info(ace->dev,
+		 "    ctrl:  %.8x  seccnt/cmd: %.4x      ver:%.4x\n"
+		 "    status:%.8x  mpu_lba:%.8x  busmode:%4x\n"
+		 "    error: %.8x  cfg_lba:%.8x  fatstat:%.4x\n",
 		 ace_in32(ace, ACE_CTRL),
 		 ace_in(ace, ACE_SECCNTCMD),
 		 ace_in(ace, ACE_VERSION),
@@ -463,10 +467,11 @@ struct request *ace_get_next_request(struct request_queue * q)
 {
 	struct request *req;
 
-	while ((req = elv_next_request(q)) != NULL) {
-		if (blk_fs_request(req))
+	while ((req = blk_peek_request(q)) != NULL) {
+		if (req->cmd_type == REQ_TYPE_FS)
 			break;
-		end_request(req, 0);
+		blk_start_request(req);
+		__blk_end_request_all(req, -EIO);
 	}
 	return req;
 }
@@ -492,9 +497,13 @@ static void ace_fsm_dostate(struct ace_device *ace)
 		set_capacity(ace->gd, 0);
 		dev_info(ace->dev, "No CF in slot\n");
 
-		/* Drop all pending requests */
-		while ((req = elv_next_request(ace->queue)) != NULL)
-			end_request(req, 0);
+		/* Drop all in-flight and pending requests */
+		if (ace->req) {
+			__blk_end_request_all(ace->req, -EIO);
+			ace->req = NULL;
+		}
+		while ((req = blk_fetch_request(ace->queue)) != NULL)
+			__blk_end_request_all(req, -EIO);
 
 		/* Drop back to IDLE state and notify waiters */
 		ace->fsm_state = ACE_FSM_STATE_IDLE;
@@ -612,7 +621,7 @@ static void ace_fsm_dostate(struct ace_device *ace)
 		ace_dump_mem(ace->cf_id, 512);	/* Debug: Dump out disk ID */
 
 		if (ace->data_result) {
-			/* Error occured, disable the disk */
+			/* Error occurred, disable the disk */
 			ace->media_change = 1;
 			set_capacity(ace->gd, 0);
 			dev_err(ace->dev, "error fetching CF id (%i)\n",
@@ -642,19 +651,21 @@ static void ace_fsm_dostate(struct ace_device *ace)
 			ace->fsm_state = ACE_FSM_STATE_IDLE;
 			break;
 		}
+		blk_start_request(req);
 
 		/* Okay, it's a data request, set it up for transfer */
 		dev_dbg(ace->dev,
-			"request: sec=%llx hcnt=%lx, ccnt=%x, dir=%i\n",
-			(unsigned long long) req->sector, req->hard_nr_sectors,
-			req->current_nr_sectors, rq_data_dir(req));
+			"request: sec=%llx hcnt=%x, ccnt=%x, dir=%i\n",
+			(unsigned long long)blk_rq_pos(req),
+			blk_rq_sectors(req), blk_rq_cur_sectors(req),
+			rq_data_dir(req));
 
 		ace->req = req;
 		ace->data_ptr = req->buffer;
-		ace->data_count = req->current_nr_sectors * ACE_BUF_PER_SECTOR;
-		ace_out32(ace, ACE_MPULBA, req->sector & 0x0FFFFFFF);
+		ace->data_count = blk_rq_cur_sectors(req) * ACE_BUF_PER_SECTOR;
+		ace_out32(ace, ACE_MPULBA, blk_rq_pos(req) & 0x0FFFFFFF);
 
-		count = req->hard_nr_sectors;
+		count = blk_rq_sectors(req);
 		if (rq_data_dir(req)) {
 			/* Kick off write request */
 			dev_dbg(ace->dev, "write data\n");
@@ -688,7 +699,7 @@ static void ace_fsm_dostate(struct ace_device *ace)
 			dev_dbg(ace->dev,
 				"CFBSY set; t=%i iter=%i c=%i dc=%i irq=%i\n",
 				ace->fsm_task, ace->fsm_iter_num,
-				ace->req->current_nr_sectors * 16,
+				blk_rq_cur_sectors(ace->req) * 16,
 				ace->data_count, ace->in_irq);
 			ace_fsm_yield(ace);	/* need to poll CFBSY bit */
 			break;
@@ -697,7 +708,7 @@ static void ace_fsm_dostate(struct ace_device *ace)
 			dev_dbg(ace->dev,
 				"DATABUF not set; t=%i iter=%i c=%i dc=%i irq=%i\n",
 				ace->fsm_task, ace->fsm_iter_num,
-				ace->req->current_nr_sectors * 16,
+				blk_rq_cur_sectors(ace->req) * 16,
 				ace->data_count, ace->in_irq);
 			ace_fsm_yieldirq(ace);
 			break;
@@ -717,14 +728,13 @@ static void ace_fsm_dostate(struct ace_device *ace)
 		}
 
 		/* bio finished; is there another one? */
-		if (__blk_end_request(ace->req, 0,
-					blk_rq_cur_bytes(ace->req))) {
-			/* dev_dbg(ace->dev, "next block; h=%li c=%i\n",
-			 *      ace->req->hard_nr_sectors,
-			 *      ace->req->current_nr_sectors);
+		if (__blk_end_request_cur(ace->req, 0)) {
+			/* dev_dbg(ace->dev, "next block; h=%u c=%u\n",
+			 *      blk_rq_sectors(ace->req),
+			 *      blk_rq_cur_sectors(ace->req));
 			 */
 			ace->data_ptr = ace->req->buffer;
-			ace->data_count = ace->req->current_nr_sectors * 16;
+			ace->data_count = blk_rq_cur_sectors(ace->req) * 16;
 			ace_fsm_yieldirq(ace);
 			break;
 		}
@@ -791,7 +801,7 @@ static int ace_interrupt_checkstate(struct ace_device *ace)
 	u32 sreg = ace_in32(ace, ACE_STATUS);
 	u16 creg = ace_in(ace, ACE_CTRL);
 
-	/* Check for error occurance */
+	/* Check for error occurrence */
 	if ((sreg & (ACE_STATUS_CFGERROR | ACE_STATUS_CFCERROR)) &&
 	    (creg & ACE_CTRL_ERRORIRQ)) {
 		dev_err(ace->dev, "transfer failure\n");
@@ -857,12 +867,12 @@ static void ace_request(struct request_queue * q)
 	}
 }
 
-static int ace_media_changed(struct gendisk *gd)
+static unsigned int ace_check_events(struct gendisk *gd, unsigned int clearing)
 {
 	struct ace_device *ace = gd->private_data;
-	dev_dbg(ace->dev, "ace_media_changed(): %i\n", ace->media_change);
+	dev_dbg(ace->dev, "ace_check_events(): %i\n", ace->media_change);
 
-	return ace->media_change;
+	return ace->media_change ? DISK_EVENT_MEDIA_CHANGE : 0;
 }
 
 static int ace_revalidate_disk(struct gendisk *gd)
@@ -894,11 +904,14 @@ static int ace_open(struct block_device *bdev, fmode_t mode)
 
 	dev_dbg(ace->dev, "ace_open() users=%i\n", ace->users + 1);
 
+	mutex_lock(&xsysace_mutex);
 	spin_lock_irqsave(&ace->lock, flags);
 	ace->users++;
 	spin_unlock_irqrestore(&ace->lock, flags);
 
 	check_disk_change(bdev);
+	mutex_unlock(&xsysace_mutex);
+
 	return 0;
 }
 
@@ -910,6 +923,7 @@ static int ace_release(struct gendisk *disk, fmode_t mode)
 
 	dev_dbg(ace->dev, "ace_release() users=%i\n", ace->users - 1);
 
+	mutex_lock(&xsysace_mutex);
 	spin_lock_irqsave(&ace->lock, flags);
 	ace->users--;
 	if (ace->users == 0) {
@@ -917,6 +931,7 @@ static int ace_release(struct gendisk *disk, fmode_t mode)
 		ace_out(ace, ACE_CTRL, val & ~ACE_CTRL_LOCKREQ);
 	}
 	spin_unlock_irqrestore(&ace->lock, flags);
+	mutex_unlock(&xsysace_mutex);
 	return 0;
 }
 
@@ -934,11 +949,11 @@ static int ace_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 	return 0;
 }
 
-static struct block_device_operations ace_fops = {
+static const struct block_device_operations ace_fops = {
 	.owner = THIS_MODULE,
 	.open = ace_open,
 	.release = ace_release,
-	.media_changed = ace_media_changed,
+	.check_events = ace_check_events,
 	.revalidate_disk = ace_revalidate_disk,
 	.getgeo = ace_getgeo,
 };
@@ -978,7 +993,7 @@ static int __devinit ace_setup(struct ace_device *ace)
 	ace->queue = blk_init_queue(ace_request, &ace->lock);
 	if (ace->queue == NULL)
 		goto err_blk_initq;
-	blk_queue_hardsect_size(ace->queue, 512);
+	blk_queue_logical_block_size(ace->queue, 512);
 
 	/*
 	 * Allocate and initialize GD structure
@@ -1140,11 +1155,18 @@ static int __devinit ace_probe(struct platform_device *dev)
 {
 	resource_size_t physaddr = 0;
 	int bus_width = ACE_BUS_WIDTH_16; /* FIXME: should not be hard coded */
-	int id = dev->id;
+	u32 id = dev->id;
 	int irq = NO_IRQ;
 	int i;
 
 	dev_dbg(&dev->dev, "ace_probe(%p)\n", dev);
+
+	/* device id and bus width */
+	of_property_read_u32(dev->dev.of_node, "port-number", &id);
+	if (id < 0)
+		id = 0;
+	if (of_find_property(dev->dev.of_node, "8-bit", NULL))
+		bus_width = ACE_BUS_WIDTH_8;
 
 	for (i = 0; i < dev->num_resources; i++) {
 		if (dev->resource[i].flags & IORESOURCE_MEM)
@@ -1153,7 +1175,7 @@ static int __devinit ace_probe(struct platform_device *dev)
 			irq = dev->resource[i].start;
 	}
 
-	/* Call the bus-independant setup code */
+	/* Call the bus-independent setup code */
 	return ace_alloc(&dev->dev, id, physaddr, irq, bus_width);
 }
 
@@ -1166,61 +1188,9 @@ static int __devexit ace_remove(struct platform_device *dev)
 	return 0;
 }
 
-static struct platform_driver ace_platform_driver = {
-	.probe = ace_probe,
-	.remove = __devexit_p(ace_remove),
-	.driver = {
-		.owner = THIS_MODULE,
-		.name = "xsysace",
-	},
-};
-
-/* ---------------------------------------------------------------------
- * OF_Platform Bus Support
- */
-
 #if defined(CONFIG_OF)
-static int __devinit
-ace_of_probe(struct of_device *op, const struct of_device_id *match)
-{
-	struct resource res;
-	resource_size_t physaddr;
-	const u32 *id;
-	int irq, bus_width, rc;
-
-	dev_dbg(&op->dev, "ace_of_probe(%p, %p)\n", op, match);
-
-	/* device id */
-	id = of_get_property(op->node, "port-number", NULL);
-
-	/* physaddr */
-	rc = of_address_to_resource(op->node, 0, &res);
-	if (rc) {
-		dev_err(&op->dev, "invalid address\n");
-		return rc;
-	}
-	physaddr = res.start;
-
-	/* irq */
-	irq = irq_of_parse_and_map(op->node, 0);
-
-	/* bus width */
-	bus_width = ACE_BUS_WIDTH_16;
-	if (of_find_property(op->node, "8-bit", NULL))
-		bus_width = ACE_BUS_WIDTH_8;
-
-	/* Call the bus-independant setup code */
-	return ace_alloc(&op->dev, id ? *id : 0, physaddr, irq, bus_width);
-}
-
-static int __devexit ace_of_remove(struct of_device *op)
-{
-	ace_free(&op->dev);
-	return 0;
-}
-
 /* Match table for of_platform binding */
-static struct of_device_id ace_of_match[] __devinitdata = {
+static const struct of_device_id ace_of_match[] __devinitconst = {
 	{ .compatible = "xlnx,opb-sysace-1.00.b", },
 	{ .compatible = "xlnx,opb-sysace-1.00.c", },
 	{ .compatible = "xlnx,xps-sysace-1.00.a", },
@@ -1228,34 +1198,19 @@ static struct of_device_id ace_of_match[] __devinitdata = {
 	{},
 };
 MODULE_DEVICE_TABLE(of, ace_of_match);
+#else /* CONFIG_OF */
+#define ace_of_match NULL
+#endif /* CONFIG_OF */
 
-static struct of_platform_driver ace_of_driver = {
-	.owner = THIS_MODULE,
-	.name = "xsysace",
-	.match_table = ace_of_match,
-	.probe = ace_of_probe,
-	.remove = __devexit_p(ace_of_remove),
+static struct platform_driver ace_platform_driver = {
+	.probe = ace_probe,
+	.remove = __devexit_p(ace_remove),
 	.driver = {
+		.owner = THIS_MODULE,
 		.name = "xsysace",
+		.of_match_table = ace_of_match,
 	},
 };
-
-/* Registration helpers to keep the number of #ifdefs to a minimum */
-static inline int __init ace_of_register(void)
-{
-	pr_debug("xsysace: registering OF binding\n");
-	return of_register_platform_driver(&ace_of_driver);
-}
-
-static inline void __exit ace_of_unregister(void)
-{
-	of_unregister_platform_driver(&ace_of_driver);
-}
-#else /* CONFIG_OF */
-/* CONFIG_OF not enabled; do nothing helpers */
-static inline int __init ace_of_register(void) { return 0; }
-static inline void __exit ace_of_unregister(void) { }
-#endif /* CONFIG_OF */
 
 /* ---------------------------------------------------------------------
  * Module init/exit routines
@@ -1270,11 +1225,6 @@ static int __init ace_init(void)
 		goto err_blk;
 	}
 
-	rc = ace_of_register();
-	if (rc)
-		goto err_of;
-
-	pr_debug("xsysace: registering platform binding\n");
 	rc = platform_driver_register(&ace_platform_driver);
 	if (rc)
 		goto err_plat;
@@ -1283,21 +1233,17 @@ static int __init ace_init(void)
 	return 0;
 
 err_plat:
-	ace_of_unregister();
-err_of:
 	unregister_blkdev(ace_major, "xsysace");
 err_blk:
 	printk(KERN_ERR "xsysace: registration failed; err=%i\n", rc);
 	return rc;
 }
+module_init(ace_init);
 
 static void __exit ace_exit(void)
 {
 	pr_debug("Unregistering Xilinx SystemACE driver\n");
 	platform_driver_unregister(&ace_platform_driver);
-	ace_of_unregister();
 	unregister_blkdev(ace_major, "xsysace");
 }
-
-module_init(ace_init);
 module_exit(ace_exit);

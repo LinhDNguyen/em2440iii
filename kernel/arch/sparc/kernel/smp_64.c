@@ -20,12 +20,15 @@
 #include <linux/cache.h>
 #include <linux/jiffies.h>
 #include <linux/profile.h>
-#include <linux/lmb.h>
+#include <linux/bootmem.h>
+#include <linux/vmalloc.h>
+#include <linux/ftrace.h>
 #include <linux/cpu.h>
+#include <linux/slab.h>
 
 #include <asm/head.h>
 #include <asm/ptrace.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
 #include <asm/cpudata.h>
@@ -46,6 +49,9 @@
 #include <asm/mdesc.h>
 #include <asm/ldc.h>
 #include <asm/hypervisor.h>
+#include <asm/pcr.h>
+
+#include "cpumap.h"
 
 int sparc64_multi_core __read_mostly;
 
@@ -115,11 +121,11 @@ void __cpuinit smp_callin(void)
 	/* inform the notifiers about the new cpu */
 	notify_cpu_starting(cpuid);
 
-	while (!cpu_isset(cpuid, smp_commenced_mask))
+	while (!cpumask_test_cpu(cpuid, &smp_commenced_mask))
 		rmb();
 
 	ipi_call_lock_irq();
-	cpu_set(cpuid, cpu_online_map);
+	set_cpu_online(cpuid, true);
 	ipi_call_unlock_irq();
 
 	/* idle thread is expected to have preempt disabled */
@@ -183,7 +189,7 @@ static inline long get_delta (long *rt, long *master)
 void smp_synchronize_tick_client(void)
 {
 	long i, delta, adj, adjust_latency = 0, done = 0;
-	unsigned long flags, rt, master_time_stamp, bound;
+	unsigned long flags, rt, master_time_stamp;
 #if DEBUG_TICK_SYNC
 	struct {
 		long rt;	/* roundtrip time */
@@ -202,10 +208,8 @@ void smp_synchronize_tick_client(void)
 	{
 		for (i = 0; i < NUM_ROUNDS; i++) {
 			delta = get_delta(&rt, &master_time_stamp);
-			if (delta == 0) {
+			if (delta == 0)
 				done = 1;	/* let's lock on to this... */
-				bound = rt;
-			}
 
 			if (!done) {
 				if (i > 0) {
@@ -278,7 +282,7 @@ static unsigned long kimage_addr_to_ra(void *p)
 	return kern_base + (val - KERNBASE);
 }
 
-static void __cpuinit ldom_startcpu_cpuid(unsigned int cpu, unsigned long thread_reg)
+static void __cpuinit ldom_startcpu_cpuid(unsigned int cpu, unsigned long thread_reg, void **descrp)
 {
 	extern unsigned long sparc64_ttable_tl0;
 	extern unsigned long kern_locked_tte_data;
@@ -298,12 +302,12 @@ static void __cpuinit ldom_startcpu_cpuid(unsigned int cpu, unsigned long thread
 		       "hvtramp_descr.\n");
 		return;
 	}
+	*descrp = hdesc;
 
 	hdesc->cpu = cpu;
 	hdesc->num_mappings = num_kernel_image_mappings;
 
 	tb = &trap_block[cpu];
-	tb->hdesc = hdesc;
 
 	hdesc->fault_info_va = (unsigned long) &tb->fault_info;
 	hdesc->fault_info_pa = kimage_addr_to_ra(&tb->fault_info);
@@ -341,12 +345,12 @@ static struct thread_info *cpu_new_thread = NULL;
 
 static int __cpuinit smp_boot_one_cpu(unsigned int cpu)
 {
-	struct trap_per_cpu *tb = &trap_block[cpu];
 	unsigned long entry =
 		(unsigned long)(&sparc64_cpu_startup);
 	unsigned long cookie =
 		(unsigned long)(&cpu_new_thread);
 	struct task_struct *p;
+	void *descr = NULL;
 	int timeout, ret;
 
 	p = fork_idle(cpu);
@@ -359,14 +363,15 @@ static int __cpuinit smp_boot_one_cpu(unsigned int cpu)
 #if defined(CONFIG_SUN_LDOMS) && defined(CONFIG_HOTPLUG_CPU)
 		if (ldom_domaining_enabled)
 			ldom_startcpu_cpuid(cpu,
-					    (unsigned long) cpu_new_thread);
+					    (unsigned long) cpu_new_thread,
+					    &descr);
 		else
 #endif
 			prom_startcpu_cpuid(cpu, entry, cookie);
 	} else {
 		struct device_node *dp = of_find_node_by_cpuid(cpu);
 
-		prom_startcpu(dp->node, entry, cookie);
+		prom_startcpu(dp->phandle, entry, cookie);
 	}
 
 	for (timeout = 0; timeout < 50000; timeout++) {
@@ -383,10 +388,7 @@ static int __cpuinit smp_boot_one_cpu(unsigned int cpu)
 	}
 	cpu_new_thread = NULL;
 
-	if (tb->hdesc) {
-		kfree(tb->hdesc);
-		tb->hdesc = NULL;
-	}
+	kfree(descr);
 
 	return ret;
 }
@@ -783,7 +785,7 @@ static void xcall_deliver(u64 data0, u64 data1, u64 data2, const cpumask_t *mask
 
 /* Send cross call to all processors mentioned in MASK_P
  * except self.  Really, there are only two cases currently,
- * "&cpu_online_map" and "&mm->cpu_vm_mask".
+ * "cpu_online_mask" and "mm_cpumask(mm)".
  */
 static void smp_cross_call_masked(unsigned long *func, u32 ctx, u64 data1, u64 data2, const cpumask_t *mask)
 {
@@ -795,7 +797,7 @@ static void smp_cross_call_masked(unsigned long *func, u32 ctx, u64 data1, u64 d
 /* Send cross call to all processors except self. */
 static void smp_cross_call(unsigned long *func, u32 ctx, u64 data1, u64 data2)
 {
-	smp_cross_call_masked(func, ctx, data1, data2, &cpu_online_map);
+	smp_cross_call_masked(func, ctx, data1, data2, cpu_online_mask);
 }
 
 extern unsigned long xcall_sync_tick;
@@ -803,7 +805,7 @@ extern unsigned long xcall_sync_tick;
 static void smp_start_sync_tick_client(int cpu)
 {
 	xcall_deliver((u64) &xcall_sync_tick, 0, 0,
-		      &cpumask_of_cpu(cpu));
+		      cpumask_of(cpu));
 }
 
 extern unsigned long xcall_call_function;
@@ -818,16 +820,16 @@ extern unsigned long xcall_call_function_single;
 void arch_send_call_function_single_ipi(int cpu)
 {
 	xcall_deliver((u64) &xcall_call_function_single, 0, 0,
-		      &cpumask_of_cpu(cpu));
+		      cpumask_of(cpu));
 }
 
-void smp_call_function_client(int irq, struct pt_regs *regs)
+void __irq_entry smp_call_function_client(int irq, struct pt_regs *regs)
 {
 	clear_softint(1 << irq);
 	generic_smp_call_function_interrupt();
 }
 
-void smp_call_function_single_client(int irq, struct pt_regs *regs)
+void __irq_entry smp_call_function_single_client(int irq, struct pt_regs *regs)
 {
 	clear_softint(1 << irq);
 	generic_smp_call_function_single_interrupt();
@@ -916,7 +918,7 @@ void smp_flush_dcache_page_impl(struct page *page, int cpu)
 		}
 		if (data0) {
 			xcall_deliver(data0, __pa(pg_addr),
-				      (u64) pg_addr, &cpumask_of_cpu(cpu));
+				      (u64) pg_addr, cpumask_of(cpu));
 #ifdef CONFIG_DEBUG_DCFLUSH
 			atomic_inc(&dcpage_flushes_xcall);
 #endif
@@ -929,13 +931,12 @@ void smp_flush_dcache_page_impl(struct page *page, int cpu)
 void flush_dcache_page_all(struct mm_struct *mm, struct page *page)
 {
 	void *pg_addr;
-	int this_cpu;
 	u64 data0;
 
 	if (tlb_type == hypervisor)
 		return;
 
-	this_cpu = get_cpu();
+	preempt_disable();
 
 #ifdef CONFIG_DEBUG_DCFLUSH
 	atomic_inc(&dcpage_flushes);
@@ -953,17 +954,17 @@ void flush_dcache_page_all(struct mm_struct *mm, struct page *page)
 	}
 	if (data0) {
 		xcall_deliver(data0, __pa(pg_addr),
-			      (u64) pg_addr, &cpu_online_map);
+			      (u64) pg_addr, cpu_online_mask);
 #ifdef CONFIG_DEBUG_DCFLUSH
 		atomic_inc(&dcpage_flushes_xcall);
 #endif
 	}
 	__local_flush_dcache_page(page);
 
-	put_cpu();
+	preempt_enable();
 }
 
-void smp_new_mmu_context_version_client(int irq, struct pt_regs *regs)
+void __irq_entry smp_new_mmu_context_version_client(int irq, struct pt_regs *regs)
 {
 	struct mm_struct *mm;
 	unsigned long flags;
@@ -1147,7 +1148,7 @@ void smp_release(void)
  */
 extern void prom_world(int);
 
-void smp_penguin_jailcell(int irq, struct pt_regs *regs)
+void __irq_entry smp_penguin_jailcell(int irq, struct pt_regs *regs)
 {
 	clear_softint(1 << irq);
 
@@ -1196,32 +1197,32 @@ void __devinit smp_fill_in_sib_core_maps(void)
 	for_each_present_cpu(i) {
 		unsigned int j;
 
-		cpus_clear(cpu_core_map[i]);
+		cpumask_clear(&cpu_core_map[i]);
 		if (cpu_data(i).core_id == 0) {
-			cpu_set(i, cpu_core_map[i]);
+			cpumask_set_cpu(i, &cpu_core_map[i]);
 			continue;
 		}
 
 		for_each_present_cpu(j) {
 			if (cpu_data(i).core_id ==
 			    cpu_data(j).core_id)
-				cpu_set(j, cpu_core_map[i]);
+				cpumask_set_cpu(j, &cpu_core_map[i]);
 		}
 	}
 
 	for_each_present_cpu(i) {
 		unsigned int j;
 
-		cpus_clear(per_cpu(cpu_sibling_map, i));
+		cpumask_clear(&per_cpu(cpu_sibling_map, i));
 		if (cpu_data(i).proc_id == -1) {
-			cpu_set(i, per_cpu(cpu_sibling_map, i));
+			cpumask_set_cpu(i, &per_cpu(cpu_sibling_map, i));
 			continue;
 		}
 
 		for_each_present_cpu(j) {
 			if (cpu_data(i).proc_id ==
 			    cpu_data(j).proc_id)
-				cpu_set(j, per_cpu(cpu_sibling_map, i));
+				cpumask_set_cpu(j, &per_cpu(cpu_sibling_map, i));
 		}
 	}
 }
@@ -1231,10 +1232,10 @@ int __cpuinit __cpu_up(unsigned int cpu)
 	int ret = smp_boot_one_cpu(cpu);
 
 	if (!ret) {
-		cpu_set(cpu, smp_commenced_mask);
-		while (!cpu_isset(cpu, cpu_online_map))
+		cpumask_set_cpu(cpu, &smp_commenced_mask);
+		while (!cpu_online(cpu))
 			mb();
-		if (!cpu_isset(cpu, cpu_online_map)) {
+		if (!cpu_online(cpu)) {
 			ret = -ENODEV;
 		} else {
 			/* On SUN4V, writes to %tick and %stick are
@@ -1268,7 +1269,7 @@ void cpu_play_dead(void)
 				tb->nonresum_mondo_pa, 0);
 	}
 
-	cpu_clear(cpu, smp_commenced_mask);
+	cpumask_clear_cpu(cpu, &smp_commenced_mask);
 	membar_safe("#Sync");
 
 	local_irq_disable();
@@ -1289,13 +1290,13 @@ int __cpu_disable(void)
 	cpuinfo_sparc *c;
 	int i;
 
-	for_each_cpu_mask(i, cpu_core_map[cpu])
-		cpu_clear(cpu, cpu_core_map[i]);
-	cpus_clear(cpu_core_map[cpu]);
+	for_each_cpu(i, &cpu_core_map[cpu])
+		cpumask_clear_cpu(cpu, &cpu_core_map[i]);
+	cpumask_clear(&cpu_core_map[cpu]);
 
-	for_each_cpu_mask(i, per_cpu(cpu_sibling_map, cpu))
-		cpu_clear(cpu, per_cpu(cpu_sibling_map, i));
-	cpus_clear(per_cpu(cpu_sibling_map, cpu));
+	for_each_cpu(i, &per_cpu(cpu_sibling_map, cpu))
+		cpumask_clear_cpu(cpu, &per_cpu(cpu_sibling_map, i));
+	cpumask_clear(&per_cpu(cpu_sibling_map, cpu));
 
 	c = &cpu_data(cpu);
 
@@ -1312,8 +1313,10 @@ int __cpu_disable(void)
 	local_irq_disable();
 
 	ipi_call_lock();
-	cpu_clear(cpu, cpu_online_map);
+	set_cpu_online(cpu, false);
 	ipi_call_unlock();
+
+	cpu_map_rebuild();
 
 	return 0;
 }
@@ -1324,11 +1327,11 @@ void __cpu_die(unsigned int cpu)
 
 	for (i = 0; i < 100; i++) {
 		smp_rmb();
-		if (!cpu_isset(cpu, smp_commenced_mask))
+		if (!cpumask_test_cpu(cpu, &smp_commenced_mask))
 			break;
 		msleep(100);
 	}
-	if (cpu_isset(cpu, smp_commenced_mask)) {
+	if (cpumask_test_cpu(cpu, &smp_commenced_mask)) {
 		printk(KERN_ERR "CPU %u didn't die...\n", cpu);
 	} else {
 #if defined(CONFIG_SUN_LDOMS)
@@ -1338,7 +1341,7 @@ void __cpu_die(unsigned int cpu)
 		do {
 			hv_err = sun4v_cpu_stop(cpu);
 			if (hv_err == HV_EOK) {
-				cpu_clear(cpu, cpu_present_map);
+				set_cpu_present(cpu, false);
 				break;
 			}
 		} while (--limit > 0);
@@ -1353,17 +1356,19 @@ void __cpu_die(unsigned int cpu)
 
 void __init smp_cpus_done(unsigned int max_cpus)
 {
+	pcr_arch_init();
 }
 
 void smp_send_reschedule(int cpu)
 {
 	xcall_deliver((u64) &xcall_receive_signal, 0, 0,
-		      &cpumask_of_cpu(cpu));
+		      cpumask_of(cpu));
 }
 
-void smp_receive_signal_client(int irq, struct pt_regs *regs)
+void __irq_entry smp_receive_signal_client(int irq, struct pt_regs *regs)
 {
 	clear_softint(1 << irq);
+	scheduler_ipi();
 }
 
 /* This is a nop because we capture all other cpus
@@ -1373,36 +1378,114 @@ void smp_send_stop(void)
 {
 }
 
-unsigned long __per_cpu_base __read_mostly;
-unsigned long __per_cpu_shift __read_mostly;
-
-EXPORT_SYMBOL(__per_cpu_base);
-EXPORT_SYMBOL(__per_cpu_shift);
-
-void __init real_setup_per_cpu_areas(void)
+/**
+ * pcpu_alloc_bootmem - NUMA friendly alloc_bootmem wrapper for percpu
+ * @cpu: cpu to allocate for
+ * @size: size allocation in bytes
+ * @align: alignment
+ *
+ * Allocate @size bytes aligned at @align for cpu @cpu.  This wrapper
+ * does the right thing for NUMA regardless of the current
+ * configuration.
+ *
+ * RETURNS:
+ * Pointer to the allocated area on success, NULL on failure.
+ */
+static void * __init pcpu_alloc_bootmem(unsigned int cpu, size_t size,
+					size_t align)
 {
-	unsigned long paddr, goal, size, i;
-	char *ptr;
+	const unsigned long goal = __pa(MAX_DMA_ADDRESS);
+#ifdef CONFIG_NEED_MULTIPLE_NODES
+	int node = cpu_to_node(cpu);
+	void *ptr;
 
-	/* Copy section for each CPU (we discard the original) */
-	goal = PERCPU_ENOUGH_ROOM;
+	if (!node_online(node) || !NODE_DATA(node)) {
+		ptr = __alloc_bootmem(size, align, goal);
+		pr_info("cpu %d has no node %d or node-local memory\n",
+			cpu, node);
+		pr_debug("per cpu data for cpu%d %lu bytes at %016lx\n",
+			 cpu, size, __pa(ptr));
+	} else {
+		ptr = __alloc_bootmem_node(NODE_DATA(node),
+					   size, align, goal);
+		pr_debug("per cpu data for cpu%d %lu bytes on node%d at "
+			 "%016lx\n", cpu, size, node, __pa(ptr));
+	}
+	return ptr;
+#else
+	return __alloc_bootmem(size, align, goal);
+#endif
+}
 
-	__per_cpu_shift = PAGE_SHIFT;
-	for (size = PAGE_SIZE; size < goal; size <<= 1UL)
-		__per_cpu_shift++;
+static void __init pcpu_free_bootmem(void *ptr, size_t size)
+{
+	free_bootmem(__pa(ptr), size);
+}
 
-	paddr = lmb_alloc(size * NR_CPUS, PAGE_SIZE);
-	if (!paddr) {
-		prom_printf("Cannot allocate per-cpu memory.\n");
-		prom_halt();
+static int __init pcpu_cpu_distance(unsigned int from, unsigned int to)
+{
+	if (cpu_to_node(from) == cpu_to_node(to))
+		return LOCAL_DISTANCE;
+	else
+		return REMOTE_DISTANCE;
+}
+
+static void __init pcpu_populate_pte(unsigned long addr)
+{
+	pgd_t *pgd = pgd_offset_k(addr);
+	pud_t *pud;
+	pmd_t *pmd;
+
+	pud = pud_offset(pgd, addr);
+	if (pud_none(*pud)) {
+		pmd_t *new;
+
+		new = __alloc_bootmem(PAGE_SIZE, PAGE_SIZE, PAGE_SIZE);
+		pud_populate(&init_mm, pud, new);
 	}
 
-	ptr = __va(paddr);
-	__per_cpu_base = ptr - __per_cpu_start;
+	pmd = pmd_offset(pud, addr);
+	if (!pmd_present(*pmd)) {
+		pte_t *new;
 
-	for (i = 0; i < NR_CPUS; i++, ptr += size)
-		memcpy(ptr, __per_cpu_start, __per_cpu_end - __per_cpu_start);
+		new = __alloc_bootmem(PAGE_SIZE, PAGE_SIZE, PAGE_SIZE);
+		pmd_populate_kernel(&init_mm, pmd, new);
+	}
+}
+
+void __init setup_per_cpu_areas(void)
+{
+	unsigned long delta;
+	unsigned int cpu;
+	int rc = -EINVAL;
+
+	if (pcpu_chosen_fc != PCPU_FC_PAGE) {
+		rc = pcpu_embed_first_chunk(PERCPU_MODULE_RESERVE,
+					    PERCPU_DYNAMIC_RESERVE, 4 << 20,
+					    pcpu_cpu_distance,
+					    pcpu_alloc_bootmem,
+					    pcpu_free_bootmem);
+		if (rc)
+			pr_warning("PERCPU: %s allocator failed (%d), "
+				   "falling back to page size\n",
+				   pcpu_fc_names[pcpu_chosen_fc], rc);
+	}
+	if (rc < 0)
+		rc = pcpu_page_first_chunk(PERCPU_MODULE_RESERVE,
+					   pcpu_alloc_bootmem,
+					   pcpu_free_bootmem,
+					   pcpu_populate_pte);
+	if (rc < 0)
+		panic("cannot initialize percpu area (err=%d)", rc);
+
+	delta = (unsigned long)pcpu_base_addr - (unsigned long)__per_cpu_start;
+	for_each_possible_cpu(cpu)
+		__per_cpu_offset(cpu) = delta + pcpu_unit_offsets[cpu];
 
 	/* Setup %g5 for the boot cpu.  */
 	__local_per_cpu_offset = __per_cpu_offset(smp_processor_id());
+
+	of_fill_in_cpu_data();
+	if (tlb_type == hypervisor)
+		mdesc_fill_in_cpu_data(cpu_all_mask);
 }

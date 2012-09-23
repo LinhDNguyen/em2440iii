@@ -2,18 +2,61 @@ Kernel driver f71882fg
 ======================
 
 Supported chips:
-  * Fintek F71882FG and F71883FG
-    Prefix: 'f71882fg'
+  * Fintek F71808E
+    Prefix: 'f71808e'
+    Addresses scanned: none, address read from Super I/O config space
+    Datasheet: Not public
+  * Fintek F71808A
+    Prefix: 'f71808a'
+    Addresses scanned: none, address read from Super I/O config space
+    Datasheet: Not public
+  * Fintek F71858FG
+    Prefix: 'f71858fg'
     Addresses scanned: none, address read from Super I/O config space
     Datasheet: Available from the Fintek website
   * Fintek F71862FG and F71863FG
     Prefix: 'f71862fg'
     Addresses scanned: none, address read from Super I/O config space
     Datasheet: Available from the Fintek website
+  * Fintek F71869F and F71869E
+    Prefix: 'f71869'
+    Addresses scanned: none, address read from Super I/O config space
+    Datasheet: Available from the Fintek website
+  * Fintek F71869A
+    Prefix: 'f71869a'
+    Addresses scanned: none, address read from Super I/O config space
+    Datasheet: Not public
+  * Fintek F71882FG and F71883FG
+    Prefix: 'f71882fg'
+    Addresses scanned: none, address read from Super I/O config space
+    Datasheet: Available from the Fintek website
+  * Fintek F71889FG
+    Prefix: 'f71889fg'
+    Addresses scanned: none, address read from Super I/O config space
+    Datasheet: Available from the Fintek website
+  * Fintek F71889ED
+    Prefix: 'f71889ed'
+    Addresses scanned: none, address read from Super I/O config space
+    Datasheet: Should become available on the Fintek website soon
+  * Fintek F71889A
+    Prefix: 'f71889a'
+    Addresses scanned: none, address read from Super I/O config space
+    Datasheet: Should become available on the Fintek website soon
   * Fintek F8000
     Prefix: 'f8000'
     Addresses scanned: none, address read from Super I/O config space
     Datasheet: Not public
+  * Fintek F81801U
+    Prefix: 'f71889fg'
+    Addresses scanned: none, address read from Super I/O config space
+    Datasheet: Not public
+    Note: This is the 64-pin variant of the F71889FG, they have the
+	  same device ID and are fully compatible as far as hardware
+	  monitoring is concerned.
+  * Fintek F81865F
+    Prefix: 'f81865f'
+    Addresses scanned: none, address read from Super I/O config space
+    Datasheet: Available from the Fintek website
 
 Author: Hans de Goede <hdegoede@redhat.com>
 
@@ -21,9 +64,9 @@ Author: Hans de Goede <hdegoede@redhat.com>
 Description
 -----------
 
-Fintek F718xxFG/F8000 Super I/O chips include complete hardware monitoring
-capabilities. They can monitor up to 9 voltages (3 for the F8000), 4 fans and
-3 temperature sensors.
+Fintek F718xx/F8000 Super I/O chips include complete hardware monitoring
+capabilities. They can monitor up to 9 voltages, 4 fans and 3 temperature
+sensors.
 
 These chips also have fan controlling features, using either DC or PWM, in
 three different modes (one manual, two automatic).
@@ -47,6 +90,12 @@ supported. The right one to use depends on external circuitry on the
 motherboard, so the driver assumes that the BIOS set the method
 properly.
 
+Note that the lowest numbered temperature zone trip point corresponds to
+to the border between the highest and one but highest temperature zones, and
+vica versa. So the temperature zone trip points 1-4 (or 1-2) go from high temp
+to low temp! This is how things are implemented in the IC, and the driver
+mimicks this.
+
 There are 2 modes to specify the speed of the fan, PWM duty cycle (or DC
 voltage) mode, where 0-100% duty cycle (0-100% of 12V) is specified. And RPM
 mode where the actual RPM of the fan (as measured) is controlled and the speed
@@ -66,13 +115,13 @@ printed when loading the driver.
 
 Three different fan control modes are supported; the mode number is written
 to the pwm#_enable file. Note that not all modes are supported on all
-chips, and some modes may only be available in RPM / PWM mode on the F8000.
+chips, and some modes may only be available in RPM / PWM mode.
 Writing an unsupported mode will result in an invalid parameter error.
 
 * 1: Manual mode
   You ask for a specific PWM duty cycle / DC voltage or a specific % of
   fan#_full_speed by writing to the pwm# file. This mode is only
-  available on the F8000 if the fan channel is in RPM mode.
+  available on the F71858FG / F8000 if the fan channel is in RPM mode.
 
 * 2: Normal auto mode
   You can define a number of temperature/fan speed trip points, which % the
@@ -85,5 +134,5 @@ Writing an unsupported mode will result in an invalid parameter error.
   The fan speed is regulated to keep the temp the fan is mapped to between
   temp#_auto_point2_temp and temp#_auto_point3_temp.
 
-Both of the automatic modes require that pwm1 corresponds to fan1, pwm2 to
+All of the automatic modes require that pwm1 corresponds to fan1, pwm2 to
 fan2 and pwm3 to fan3.

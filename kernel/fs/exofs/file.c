@@ -1,8 +1,6 @@
 /*
  * Copyright (C) 2005, 2006
- * Avishay Traeger (avishay@gmail.com) (avishay@il.ibm.com)
- * Copyright (C) 2005, 2006
- * International Business Machines
+ * Avishay Traeger (avishay@gmail.com)
  * Copyright (C) 2008, 2009
  * Boaz Harrosh <bharrosh@panasas.com>
  *
@@ -32,9 +30,6 @@
  * along with exofs; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
-#include <linux/buffer_head.h>
-
 #include "exofs.h"
 
 static int exofs_release_file(struct inode *inode, struct file *filp)
@@ -42,28 +37,32 @@ static int exofs_release_file(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static int exofs_file_fsync(struct file *filp, struct dentry *dentry,
+/* exofs_file_fsync - flush the inode to disk
+ *
+ *   Note, in exofs all metadata is written as part of inode, regardless.
+ *   The writeout is synchronous
+ */
+static int exofs_file_fsync(struct file *filp, loff_t start, loff_t end,
 			    int datasync)
 {
+	struct inode *inode = filp->f_mapping->host;
 	int ret;
-	struct address_space *mapping = filp->f_mapping;
 
-	ret = filemap_write_and_wait(mapping);
+	ret = filemap_write_and_wait_range(inode->i_mapping, start, end);
 	if (ret)
 		return ret;
 
-	/*Note: file_fsync below also calles sync_blockdev, which is a no-op
-	 *      for exofs, but other then that it does sync_inode and
-	 *      sync_superblock which is what we need here.
-	 */
-	return file_fsync(filp, dentry, datasync);
+	mutex_lock(&inode->i_mutex);
+	ret = sync_inode_metadata(filp->f_mapping->host, 1);
+	mutex_unlock(&inode->i_mutex);
+	return ret;
 }
 
 static int exofs_flush(struct file *file, fl_owner_t id)
 {
-	exofs_file_fsync(file, file->f_path.dentry, 1);
+	int ret = vfs_fsync(file, 0);
 	/* TODO: Flush the OSD target */
-	return 0;
+	return ret;
 }
 
 const struct file_operations exofs_file_operations = {
@@ -82,6 +81,5 @@ const struct file_operations exofs_file_operations = {
 };
 
 const struct inode_operations exofs_file_inode_operations = {
-	.truncate	= exofs_truncate,
 	.setattr	= exofs_setattr,
 };

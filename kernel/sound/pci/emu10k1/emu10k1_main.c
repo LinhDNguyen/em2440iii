@@ -711,8 +711,7 @@ static int snd_emu1010_load_firmware(struct snd_emu10k1 *emu, const char *filena
 static int emu1010_firmware_thread(void *data)
 {
 	struct snd_emu10k1 *emu = data;
-	int tmp, tmp2;
-	int reg;
+	u32 tmp, tmp2, reg;
 	int err;
 
 	for (;;) {
@@ -758,7 +757,8 @@ static int emu1010_firmware_thread(void *data)
 			snd_printk(KERN_INFO "emu1010: Audio Dock Firmware loaded\n");
 			snd_emu1010_fpga_read(emu, EMU_DOCK_MAJOR_REV, &tmp);
 			snd_emu1010_fpga_read(emu, EMU_DOCK_MINOR_REV, &tmp2);
-			snd_printk("Audio Dock ver:%d.%d\n", tmp, tmp2);
+			snd_printk(KERN_INFO "Audio Dock ver: %u.%u\n",
+				   tmp, tmp2);
 			/* Sync clocking between 1010 and Dock */
 			/* Allow DLL to settle */
 			msleep(10);
@@ -804,8 +804,7 @@ static int emu1010_firmware_thread(void *data)
 static int snd_emu10k1_emu1010_init(struct snd_emu10k1 *emu)
 {
 	unsigned int i;
-	int tmp, tmp2;
-	int reg;
+	u32 tmp, tmp2, reg;
 	int err;
 	const char *filename = NULL;
 
@@ -887,7 +886,7 @@ static int snd_emu10k1_emu1010_init(struct snd_emu10k1 *emu)
 	snd_printk(KERN_INFO "emu1010: Hana Firmware loaded\n");
 	snd_emu1010_fpga_read(emu, EMU_HANA_MAJOR_REV, &tmp);
 	snd_emu1010_fpga_read(emu, EMU_HANA_MINOR_REV, &tmp2);
-	snd_printk("emu1010: Hana version: %d.%d\n", tmp, tmp2);
+	snd_printk(KERN_INFO "emu1010: Hana version: %u.%u\n", tmp, tmp2);
 	/* Enable 48Volt power to Audio Dock */
 	snd_emu1010_fpga_write(emu, EMU_HANA_DOCK_PWR, EMU_HANA_DOCK_PWR_ON);
 
@@ -927,7 +926,7 @@ static int snd_emu10k1_emu1010_init(struct snd_emu10k1 *emu)
 	snd_emu1010_fpga_write(emu, EMU_HANA_MIDI_IN, 0x19);
 	/* Unknown. */
 	snd_emu1010_fpga_write(emu, EMU_HANA_MIDI_OUT, 0x0c);
-	/* IRQ Enable: Alll on */
+	/* IRQ Enable: All on */
 	/* snd_emu1010_fpga_write(emu, 0x09, 0x0f ); */
 	/* IRQ Enable: All off */
 	snd_emu1010_fpga_write(emu, EMU_HANA_IRQ_ENABLE, 0x00);
@@ -1441,6 +1440,14 @@ static struct snd_emu_chip_details emu_chip_details[] = {
 	 .ca0102_chip = 1,
 	 .spk71 = 1,
 	 .emu_model = EMU_MODEL_EMU0404}, /* EMU 0404 */
+	/* EMU0404 PCIe */
+	{.vendor = 0x1102, .device = 0x0008, .subsystem = 0x40051102,
+	 .driver = "Audigy2", .name = "E-mu 0404 PCIe [MAEM8984]",
+	 .id = "EMU0404",
+	 .emu10k2_chip = 1,
+	 .ca0108_chip = 1,
+	 .spk71 = 1,
+	 .emu_model = EMU_MODEL_EMU0404}, /* EMU 0404 PCIe ver_03 */
 	/* Note that all E-mu cards require kernel 2.6 or newer. */
 	{.vendor = 0x1102, .device = 0x0008,
 	 .driver = "Audigy2", .name = "SB Audigy 2 Value [Unknown]",
@@ -1788,7 +1795,7 @@ int __devinit snd_emu10k1_create(struct snd_card *card,
 	else if (subsystem)
 		snd_printdd("Sound card name = %s, "
 			"vendor = 0x%x, device = 0x%x, subsystem = 0x%x. "
-			"Forced to subsytem = 0x%x\n",	c->name,
+			"Forced to subsystem = 0x%x\n",	c->name,
 			pci->vendor, pci->device, emu->serial, c->subsystem);
 	else
 		snd_printdd("Sound card name = %s, "
@@ -1905,7 +1912,7 @@ int __devinit snd_emu10k1_create(struct snd_card *card,
 
 	/* irq handler must be registered after I/O ports are activated */
 	if (request_irq(pci->irq, snd_emu10k1_interrupt, IRQF_SHARED,
-			"EMU10K1", emu)) {
+			KBUILD_MODNAME, emu)) {
 		err = -EBUSY;
 		goto error;
 	}

@@ -28,13 +28,6 @@
 
 #endif
 
-/* FIXME: I don't want to stay hardcoded */
-#ifdef CONFIG_X86_64
-# define FTRACE_SYSCALL_MAX     296
-#else
-# define FTRACE_SYSCALL_MAX     333
-#endif
-
 #ifdef CONFIG_FUNCTION_TRACER
 #define MCOUNT_ADDR		((long)(mcount))
 #define MCOUNT_INSN_SIZE	5 /* sizeof mcount call */
@@ -45,11 +38,10 @@ extern void mcount(void);
 static inline unsigned long ftrace_call_adjust(unsigned long addr)
 {
 	/*
-	 * call mcount is "e8 <4 byte offset>"
-	 * The addr points to the 4 byte offset and the caller of this
-	 * function wants the pointer to e8. Simply subtract one.
+	 * addr is the address of the mcount call instruction.
+	 * recordmcount does the necessary offset calculation.
 	 */
-	return addr - 1;
+	return addr;
 }
 
 #ifdef CONFIG_DYNAMIC_FTRACE

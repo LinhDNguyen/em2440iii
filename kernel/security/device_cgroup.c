@@ -10,6 +10,7 @@
 #include <linux/list.h>
 #include <linux/uaccess.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
 #include <linux/rcupdate.h>
 #include <linux/mutex.h>
 
@@ -124,14 +125,6 @@ static int dev_whitelist_add(struct dev_cgroup *dev_cgroup,
 	return 0;
 }
 
-static void whitelist_item_free(struct rcu_head *rcu)
-{
-	struct dev_whitelist_item *item;
-
-	item = container_of(rcu, struct dev_whitelist_item, rcu);
-	kfree(item);
-}
-
 /*
  * called under devcgroup_mutex
  */
@@ -154,7 +147,7 @@ remove:
 		walk->access &= ~wh->access;
 		if (!walk->access) {
 			list_del_rcu(&walk->list);
-			call_rcu(&walk->rcu, whitelist_item_free);
+			kfree_rcu(walk, rcu);
 		}
 	}
 }
@@ -468,21 +461,15 @@ struct cgroup_subsys devices_subsys = {
 	.name = "devices",
 	.can_attach = devcgroup_can_attach,
 	.create = devcgroup_create,
-	.destroy  = devcgroup_destroy,
+	.destroy = devcgroup_destroy,
 	.populate = devcgroup_populate,
 	.subsys_id = devices_subsys_id,
 };
 
-int devcgroup_inode_permission(struct inode *inode, int mask)
+int __devcgroup_inode_permission(struct inode *inode, int mask)
 {
 	struct dev_cgroup *dev_cgroup;
 	struct dev_whitelist_item *wh;
-
-	dev_t device = inode->i_rdev;
-	if (!device)
-		return 0;
-	if (!S_ISBLK(inode->i_mode) && !S_ISCHR(inode->i_mode))
-		return 0;
 
 	rcu_read_lock();
 
@@ -490,7 +477,7 @@ int devcgroup_inode_permission(struct inode *inode, int mask)
 
 	list_for_each_entry_rcu(wh, &dev_cgroup->whitelist, list) {
 		if (wh->type & DEV_ALL)
-			goto acc_check;
+			goto found;
 		if ((wh->type & DEV_BLOCK) && !S_ISBLK(inode->i_mode))
 			continue;
 		if ((wh->type & DEV_CHAR) && !S_ISCHR(inode->i_mode))
@@ -499,11 +486,12 @@ int devcgroup_inode_permission(struct inode *inode, int mask)
 			continue;
 		if (wh->minor != ~0 && wh->minor != iminor(inode))
 			continue;
-acc_check:
+
 		if ((mask & MAY_WRITE) && !(wh->access & ACC_WRITE))
 			continue;
 		if ((mask & MAY_READ) && !(wh->access & ACC_READ))
 			continue;
+found:
 		rcu_read_unlock();
 		return 0;
 	}
@@ -527,7 +515,7 @@ int devcgroup_inode_mknod(int mode, dev_t dev)
 
 	list_for_each_entry_rcu(wh, &dev_cgroup->whitelist, list) {
 		if (wh->type & DEV_ALL)
-			goto acc_check;
+			goto found;
 		if ((wh->type & DEV_BLOCK) && !S_ISBLK(mode))
 			continue;
 		if ((wh->type & DEV_CHAR) && !S_ISCHR(mode))
@@ -536,9 +524,10 @@ int devcgroup_inode_mknod(int mode, dev_t dev)
 			continue;
 		if (wh->minor != ~0 && wh->minor != MINOR(dev))
 			continue;
-acc_check:
+
 		if (!(wh->access & ACC_MKNOD))
 			continue;
+found:
 		rcu_read_unlock();
 		return 0;
 	}

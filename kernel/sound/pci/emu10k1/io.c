@@ -226,7 +226,9 @@ int snd_emu10k1_i2c_write(struct snd_emu10k1 *emu,
 				break;
 
 			if (timeout > 1000) {
-                		snd_printk("emu10k1:I2C:timeout status=0x%x\n", status);
+                		snd_printk(KERN_WARNING
+					   "emu10k1:I2C:timeout status=0x%x\n",
+					   status);
 				break;
 			}
 		}
@@ -254,7 +256,7 @@ int snd_emu1010_fpga_write(struct snd_emu10k1 * emu, u32 reg, u32 value)
 	if (reg > 0x3f)
 		return 1;
 	reg += 0x40; /* 0x40 upwards are registers. */
-	if (value < 0 || value > 0x3f) /* 0 to 0x3f are values */
+	if (value > 0x3f) /* 0 to 0x3f are values */
 		return 1;
 	spin_lock_irqsave(&emu->emu_lock, flags);
 	outl(reg, emu->port + A_IOCFG);
@@ -488,7 +490,7 @@ void snd_emu10k1_wait(struct snd_emu10k1 *emu, unsigned int wait)
 			if (newtime != curtime)
 				break;
 		}
-		if (count >= 16384)
+		if (count > 16384)
 			break;
 		curtime = newtime;
 	}

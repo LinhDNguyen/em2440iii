@@ -12,13 +12,14 @@
  *
  */
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <crypto/internal/rng.h>
 #include <linux/err.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/random.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 
 static DEFINE_MUTEX(crypto_default_rng_lock);
@@ -123,4 +124,4 @@ void crypto_put_default_rng(void)
 EXPORT_SYMBOL_GPL(crypto_put_default_rng);
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Random Number Genertor");
+MODULE_DESCRIPTION("Random Number Generator");

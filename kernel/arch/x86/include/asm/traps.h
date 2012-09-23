@@ -1,7 +1,10 @@
 #ifndef _ASM_X86_TRAPS_H
 #define _ASM_X86_TRAPS_H
 
+#include <linux/kprobes.h>
+
 #include <asm/debugreg.h>
+#include <asm/siginfo.h>			/* TRAP_TRACE, ... */
 
 #ifdef CONFIG_X86_32
 #define dotraplinkage
@@ -13,6 +16,9 @@ asmlinkage void divide_error(void);
 asmlinkage void debug(void);
 asmlinkage void nmi(void);
 asmlinkage void int3(void);
+asmlinkage void xen_debug(void);
+asmlinkage void xen_int3(void);
+asmlinkage void xen_stack_segment(void);
 asmlinkage void overflow(void);
 asmlinkage void bounds(void);
 asmlinkage void invalid_op(void);
@@ -26,6 +32,7 @@ asmlinkage void segment_not_present(void);
 asmlinkage void stack_segment(void);
 asmlinkage void general_protection(void);
 asmlinkage void page_fault(void);
+asmlinkage void async_page_fault(void);
 asmlinkage void spurious_interrupt_bug(void);
 asmlinkage void coprocessor_error(void);
 asmlinkage void alignment_check(void);
@@ -74,13 +81,10 @@ static inline int get_si_code(unsigned long condition)
 }
 
 extern int panic_on_unrecovered_nmi;
-extern int kstack_depth_to_print;
 
-void math_error(void __user *);
+void math_error(struct pt_regs *, int, int);
 void math_emulate(struct math_emu_info *);
-#ifdef CONFIG_X86_32
-unsigned long patch_espfix_desc(unsigned long, unsigned long);
-#else
+#ifndef CONFIG_X86_32
 asmlinkage void smp_thermal_interrupt(void);
 asmlinkage void mce_threshold_interrupt(void);
 #endif

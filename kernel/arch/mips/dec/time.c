@@ -1,6 +1,4 @@
 /*
- *  linux/arch/mips/dec/time.c
- *
  *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
  *  Copyright (C) 2000, 2003  Maciej W. Rozycki
  *
@@ -20,7 +18,7 @@
 #include <asm/dec/ioasic.h>
 #include <asm/dec/machtype.h>
 
-unsigned long read_persistent_clock(void)
+void read_persistent_clock(struct timespec *ts)
 {
 	unsigned int year, mon, day, hour, min, sec, real_year;
 	unsigned long flags;
@@ -55,7 +53,8 @@ unsigned long read_persistent_clock(void)
 
 	year += real_year - 72 + 2000;
 
-	return mktime(year, mon, day, hour, min, sec);
+	ts->tv_sec = mktime(year, mon, day, hour, min, sec);
+	ts->tv_nsec = 0;
 }
 
 /*
@@ -105,7 +104,7 @@ int rtc_mips_set_mmss(unsigned long nowtime)
 		CMOS_WRITE(real_seconds, RTC_SECONDS);
 		CMOS_WRITE(real_minutes, RTC_MINUTES);
 	} else {
-		printk(KERN_WARNING
+		printk_once(KERN_NOTICE
 		       "set_rtc_mmss: can't update from %d to %d\n",
 		       cmos_minutes, real_minutes);
 		retval = -1;

@@ -44,11 +44,11 @@
  * TODO:  - Check MPU structure version/signature
  *        - Add things like /sbin/overtemp for non-critical
  *          overtemp conditions so userland can take some policy
- *          decisions, like slewing down CPUs
+ *          decisions, like slowing down CPUs
  *	  - Deal with fan and i2c failures in a better way
  *	  - Maybe do a generic PID based on params used for
  *	    U3 and Drives ? Definitely need to factor code a bit
- *          bettter... also make sensor detection more robust using
+ *          better... also make sensor detection more robust using
  *          the device-tree to probe for them
  *        - Figure out how to get the slots consumption and set the
  *          slots fan accordingly
@@ -91,7 +91,7 @@
  *
  *  Mar. 10, 2005 : 1.2
  *	- Add basic support for Xserve G5
- *	- Retreive pumps min/max from EEPROM image in device-tree (broken)
+ *	- Retrieve pumps min/max from EEPROM image in device-tree (broken)
  *	- Use min/max macros here or there
  *	- Latest darwin updated U3H min fan speed to 20% PWM
  *
@@ -114,7 +114,6 @@
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
-#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/wait.h>
@@ -149,12 +148,12 @@
  * Driver statics
  */
 
-static struct of_device *		of_dev;
+static struct platform_device *		of_dev;
 static struct i2c_adapter *		u3_0;
 static struct i2c_adapter *		u3_1;
 static struct i2c_adapter *		k2;
 static struct i2c_client *		fcu;
-static struct cpu_pid_state		cpu_state[2];
+static struct cpu_pid_state		processor_state[2];
 static struct basckside_pid_params	backside_params;
 static struct backside_pid_state	backside_state;
 static struct drives_pid_state		drives_state;
@@ -286,21 +285,7 @@ struct fcu_fan_table	fcu_fans[] = {
 	},
 };
 
-/*
- * i2c_driver structure to attach to the host i2c controller
- */
-
-static int therm_pm72_attach(struct i2c_adapter *adapter);
-static int therm_pm72_detach(struct i2c_adapter *adapter);
-
-static struct i2c_driver therm_pm72_driver =
-{
-	.driver = {
-		.name	= "therm_pm72",
-	},
-	.attach_adapter	= therm_pm72_attach,
-	.detach_adapter	= therm_pm72_detach,
-};
+static struct i2c_driver therm_pm72_driver;
 
 /*
  * Utility function to create an i2c_client structure and
@@ -310,6 +295,7 @@ static struct i2c_client *attach_i2c_chip(int id, const char *name)
 {
 	struct i2c_client *clt;
 	struct i2c_adapter *adap;
+	struct i2c_board_info info;
 
 	if (id & 0x200)
 		adap = k2;
@@ -320,31 +306,21 @@ static struct i2c_client *attach_i2c_chip(int id, const char *name)
 	if (adap == NULL)
 		return NULL;
 
-	clt = kzalloc(sizeof(struct i2c_client), GFP_KERNEL);
-	if (clt == NULL)
-		return NULL;
-
-	clt->addr = (id >> 1) & 0x7f;
-	clt->adapter = adap;
-	clt->driver = &therm_pm72_driver;
-	strncpy(clt->name, name, I2C_NAME_SIZE-1);
-
-	if (i2c_attach_client(clt)) {
+	memset(&info, 0, sizeof(struct i2c_board_info));
+	info.addr = (id >> 1) & 0x7f;
+	strlcpy(info.type, "therm_pm72", I2C_NAME_SIZE);
+	clt = i2c_new_device(adap, &info);
+	if (!clt) {
 		printk(KERN_ERR "therm_pm72: Failed to attach to i2c ID 0x%x\n", id);
-		kfree(clt);
 		return NULL;
 	}
-	return clt;
-}
 
-/*
- * Utility function to get rid of the i2c_client structure
- * (will also detach from the adapter hopepfully)
- */
-static void detach_i2c_chip(struct i2c_client *clt)
-{
-	i2c_detach_client(clt);
-	kfree(clt);
+	/*
+	 * Let i2c-core delete that device on driver removal.
+	 * This is safe because i2c-core holds the core_lock mutex for us.
+	 */
+	list_add_tail(&clt->detected, &therm_pm72_driver.clients);
+	return clt;
 }
 
 /*
@@ -399,7 +375,7 @@ static int read_smon_adc(struct cpu_pid_state *state, int chan)
 		rc = i2c_master_send(state->monitor, buf, 2);
 		if (rc <= 0)
 			goto error;
-		/* Wait for convertion */
+		/* Wait for conversion */
 		msleep(1);
 		/* Switch to data register */
 		buf[0] = 4;
@@ -467,7 +443,7 @@ static int fan_read_reg(int reg, unsigned char *buf, int nb)
 	tries = 0;
 	for (;;) {
 		nr = i2c_master_recv(fcu, buf, nb);
-		if (nr > 0 || (nr < 0 && nr != ENODEV) || tries >= 100)
+		if (nr > 0 || (nr < 0 && nr != -ENODEV) || tries >= 100)
 			break;
 		msleep(10);
 		++tries;
@@ -488,7 +464,7 @@ static int fan_write_reg(int reg, const unsigned char *ptr, int nb)
 	tries = 0;
 	for (;;) {
 		nw = i2c_master_send(fcu, buf, nb);
-		if (nw > 0 || (nw < 0 && nw != EIO) || tries >= 100)
+		if (nw > 0 || (nw < 0 && nw != -EIO) || tries >= 100)
 			break;
 		msleep(10);
 		++tries;
@@ -688,8 +664,8 @@ static int read_eeprom(int cpu, struct mpu_data *out)
 
 static void fetch_cpu_pumps_minmax(void)
 {
-	struct cpu_pid_state *state0 = &cpu_state[0];
-	struct cpu_pid_state *state1 = &cpu_state[1];
+	struct cpu_pid_state *state0 = &processor_state[0];
+	struct cpu_pid_state *state1 = &processor_state[1];
 	u16 pump_min = 0, pump_max = 0xffff;
 	u16 tmp[4];
 
@@ -741,17 +717,17 @@ static ssize_t show_##name(struct device *dev, struct device_attribute *attr, ch
 	return sprintf(buf, "%d", data);			\
 }
 
-BUILD_SHOW_FUNC_FIX(cpu0_temperature, cpu_state[0].last_temp)
-BUILD_SHOW_FUNC_FIX(cpu0_voltage, cpu_state[0].voltage)
-BUILD_SHOW_FUNC_FIX(cpu0_current, cpu_state[0].current_a)
-BUILD_SHOW_FUNC_INT(cpu0_exhaust_fan_rpm, cpu_state[0].rpm)
-BUILD_SHOW_FUNC_INT(cpu0_intake_fan_rpm, cpu_state[0].intake_rpm)
+BUILD_SHOW_FUNC_FIX(cpu0_temperature, processor_state[0].last_temp)
+BUILD_SHOW_FUNC_FIX(cpu0_voltage, processor_state[0].voltage)
+BUILD_SHOW_FUNC_FIX(cpu0_current, processor_state[0].current_a)
+BUILD_SHOW_FUNC_INT(cpu0_exhaust_fan_rpm, processor_state[0].rpm)
+BUILD_SHOW_FUNC_INT(cpu0_intake_fan_rpm, processor_state[0].intake_rpm)
 
-BUILD_SHOW_FUNC_FIX(cpu1_temperature, cpu_state[1].last_temp)
-BUILD_SHOW_FUNC_FIX(cpu1_voltage, cpu_state[1].voltage)
-BUILD_SHOW_FUNC_FIX(cpu1_current, cpu_state[1].current_a)
-BUILD_SHOW_FUNC_INT(cpu1_exhaust_fan_rpm, cpu_state[1].rpm)
-BUILD_SHOW_FUNC_INT(cpu1_intake_fan_rpm, cpu_state[1].intake_rpm)
+BUILD_SHOW_FUNC_FIX(cpu1_temperature, processor_state[1].last_temp)
+BUILD_SHOW_FUNC_FIX(cpu1_voltage, processor_state[1].voltage)
+BUILD_SHOW_FUNC_FIX(cpu1_current, processor_state[1].current_a)
+BUILD_SHOW_FUNC_INT(cpu1_exhaust_fan_rpm, processor_state[1].rpm)
+BUILD_SHOW_FUNC_INT(cpu1_intake_fan_rpm, processor_state[1].intake_rpm)
 
 BUILD_SHOW_FUNC_FIX(backside_temperature, backside_state.last_temp)
 BUILD_SHOW_FUNC_INT(backside_fan_pwm, backside_state.pwm)
@@ -943,8 +919,8 @@ static void do_cpu_pid(struct cpu_pid_state *state, s32 temp, s32 power)
 
 static void do_monitor_cpu_combined(void)
 {
-	struct cpu_pid_state *state0 = &cpu_state[0];
-	struct cpu_pid_state *state1 = &cpu_state[1];
+	struct cpu_pid_state *state0 = &processor_state[0];
+	struct cpu_pid_state *state1 = &processor_state[1];
 	s32 temp0, power0, temp1, power1;
 	s32 temp_combi, power_combi;
 	int rc, intake, pump;
@@ -971,10 +947,16 @@ static void do_monitor_cpu_combined(void)
 		printk(KERN_WARNING "Warning ! Temperature way above maximum (%d) !\n",
 		       temp_combi >> 16);
 		state0->overtemp += CPU_MAX_OVERTEMP / 4;
-	} else if (temp_combi > (state0->mpu.tmax << 16))
+	} else if (temp_combi > (state0->mpu.tmax << 16)) {
 		state0->overtemp++;
-	else
+		printk(KERN_WARNING "Temperature %d above max %d. overtemp %d\n",
+		       temp_combi >> 16, state0->mpu.tmax, state0->overtemp);
+	} else {
+		if (state0->overtemp)
+			printk(KERN_WARNING "Temperature back down to %d\n",
+			       temp_combi >> 16);
 		state0->overtemp = 0;
+	}
 	if (state0->overtemp >= CPU_MAX_OVERTEMP)
 		critical_state = 1;
 	if (state0->overtemp > 0) {
@@ -1046,10 +1028,16 @@ static void do_monitor_cpu_split(struct cpu_pid_state *state)
 		       " (%d) !\n",
 		       state->index, temp >> 16);
 		state->overtemp += CPU_MAX_OVERTEMP / 4;
-	} else if (temp > (state->mpu.tmax << 16))
+	} else if (temp > (state->mpu.tmax << 16)) {
 		state->overtemp++;
-	else
+		printk(KERN_WARNING "CPU %d temperature %d above max %d. overtemp %d\n",
+		       state->index, temp >> 16, state->mpu.tmax, state->overtemp);
+	} else {
+		if (state->overtemp)
+			printk(KERN_WARNING "CPU %d temperature back down to %d\n",
+			       state->index, temp >> 16);
 		state->overtemp = 0;
+	}
 	if (state->overtemp >= CPU_MAX_OVERTEMP)
 		critical_state = 1;
 	if (state->overtemp > 0) {
@@ -1108,10 +1096,16 @@ static void do_monitor_cpu_rack(struct cpu_pid_state *state)
 		       " (%d) !\n",
 		       state->index, temp >> 16);
 		state->overtemp = CPU_MAX_OVERTEMP / 4;
-	} else if (temp > (state->mpu.tmax << 16))
+	} else if (temp > (state->mpu.tmax << 16)) {
 		state->overtemp++;
-	else
+		printk(KERN_WARNING "CPU %d temperature %d above max %d. overtemp %d\n",
+		       state->index, temp >> 16, state->mpu.tmax, state->overtemp);
+	} else {
+		if (state->overtemp)
+			printk(KERN_WARNING "CPU %d temperature back down to %d\n",
+			       state->index, temp >> 16);
 		state->overtemp = 0;
+	}
 	if (state->overtemp >= CPU_MAX_OVERTEMP)
 		critical_state = 1;
 	if (state->overtemp > 0) {
@@ -1156,7 +1150,7 @@ static void do_monitor_cpu_rack(struct cpu_pid_state *state)
 /*
  * Initialize the state structure for one CPU control loop
  */
-static int init_cpu_state(struct cpu_pid_state *state, int index)
+static int init_processor_state(struct cpu_pid_state *state, int index)
 {
 	int err;
 
@@ -1198,13 +1192,11 @@ static int init_cpu_state(struct cpu_pid_state *state, int index)
 		err |= device_create_file(&of_dev->dev, &dev_attr_cpu1_intake_fan_rpm);
 	}
 	if (err)
-		printk(KERN_WARNING "Failed to create some of the atribute"
+		printk(KERN_WARNING "Failed to create some of the attribute"
 			"files for CPU %d\n", index);
 
 	return 0;
  fail:
-	if (state->monitor)
-		detach_i2c_chip(state->monitor);
 	state->monitor = NULL;
 	
 	return -ENODEV;
@@ -1213,7 +1205,7 @@ static int init_cpu_state(struct cpu_pid_state *state, int index)
 /*
  * Dispose of the state data for one CPU control loop
  */
-static void dispose_cpu_state(struct cpu_pid_state *state)
+static void dispose_processor_state(struct cpu_pid_state *state)
 {
 	if (state->monitor == NULL)
 		return;
@@ -1232,7 +1224,6 @@ static void dispose_cpu_state(struct cpu_pid_state *state)
 		device_remove_file(&of_dev->dev, &dev_attr_cpu1_intake_fan_rpm);
 	}
 
-	detach_i2c_chip(state->monitor);
 	state->monitor = NULL;
 }
 
@@ -1407,7 +1398,6 @@ static void dispose_backside_state(struct backside_pid_state *state)
 	device_remove_file(&of_dev->dev, &dev_attr_backside_temperature);
 	device_remove_file(&of_dev->dev, &dev_attr_backside_fan_pwm);
 
-	detach_i2c_chip(state->monitor);
 	state->monitor = NULL;
 }
  
@@ -1532,7 +1522,6 @@ static void dispose_drives_state(struct drives_pid_state *state)
 	device_remove_file(&of_dev->dev, &dev_attr_drives_temperature);
 	device_remove_file(&of_dev->dev, &dev_attr_drives_fan_rpm);
 
-	detach_i2c_chip(state->monitor);
 	state->monitor = NULL;
 }
 
@@ -1654,7 +1643,6 @@ static void dispose_dimms_state(struct dimm_pid_state *state)
 
 	device_remove_file(&of_dev->dev, &dev_attr_dimms_temperature);
 
-	detach_i2c_chip(state->monitor);
 	state->monitor = NULL;
 }
 
@@ -1779,7 +1767,6 @@ static void dispose_slots_state(struct slots_pid_state *state)
 	device_remove_file(&of_dev->dev, &dev_attr_slots_temperature);
 	device_remove_file(&of_dev->dev, &dev_attr_slots_fan_pwm);
 
-	detach_i2c_chip(state->monitor);
 	state->monitor = NULL;
 }
 
@@ -1817,9 +1804,9 @@ static int main_control_loop(void *x)
 		set_pwm_fan(SLOTS_FAN_PWM_INDEX, SLOTS_FAN_DEFAULT_PWM);
 
 	/* Initialize ADCs */
-	initialize_adc(&cpu_state[0]);
-	if (cpu_state[1].monitor != NULL)
-		initialize_adc(&cpu_state[1]);
+	initialize_adc(&processor_state[0]);
+	if (processor_state[1].monitor != NULL)
+		initialize_adc(&processor_state[1]);
 
 	fcu_tickle_ticks = FCU_TICKLE_TICKS;
 
@@ -1846,14 +1833,14 @@ static int main_control_loop(void *x)
 		if (cpu_pid_type == CPU_PID_TYPE_COMBINED)
 			do_monitor_cpu_combined();
 		else if (cpu_pid_type == CPU_PID_TYPE_RACKMAC) {
-			do_monitor_cpu_rack(&cpu_state[0]);
-			if (cpu_state[1].monitor != NULL)
-				do_monitor_cpu_rack(&cpu_state[1]);
+			do_monitor_cpu_rack(&processor_state[0]);
+			if (processor_state[1].monitor != NULL)
+				do_monitor_cpu_rack(&processor_state[1]);
 			// better deal with UP
 		} else {
-			do_monitor_cpu_split(&cpu_state[0]);
-			if (cpu_state[1].monitor != NULL)
-				do_monitor_cpu_split(&cpu_state[1]);
+			do_monitor_cpu_split(&processor_state[0]);
+			if (processor_state[1].monitor != NULL)
+				do_monitor_cpu_split(&processor_state[1]);
 			// better deal with UP
 		}
 		/* Then, the rest */
@@ -1898,8 +1885,8 @@ static int main_control_loop(void *x)
  */
 static void dispose_control_loops(void)
 {
-	dispose_cpu_state(&cpu_state[0]);
-	dispose_cpu_state(&cpu_state[1]);
+	dispose_processor_state(&processor_state[0]);
+	dispose_processor_state(&processor_state[1]);
 	dispose_backside_state(&backside_state);
 	dispose_drives_state(&drives_state);
 	dispose_slots_state(&slots_state);
@@ -1929,7 +1916,7 @@ static int create_control_loops(void)
 	 */
 	if (rackmac)
 		cpu_pid_type = CPU_PID_TYPE_RACKMAC;
-	else if (machine_is_compatible("PowerMac7,3")
+	else if (of_machine_is_compatible("PowerMac7,3")
 	    && (cpu_count > 1)
 	    && fcu_fans[CPUA_PUMP_RPM_INDEX].id != FCU_FAN_ABSENT_ID
 	    && fcu_fans[CPUB_PUMP_RPM_INDEX].id != FCU_FAN_ABSENT_ID) {
@@ -1941,12 +1928,12 @@ static int create_control_loops(void)
 	/* Create control loops for everything. If any fail, everything
 	 * fails
 	 */
-	if (init_cpu_state(&cpu_state[0], 0))
+	if (init_processor_state(&processor_state[0], 0))
 		goto fail;
 	if (cpu_pid_type == CPU_PID_TYPE_COMBINED)
 		fetch_cpu_pumps_minmax();
 
-	if (cpu_count > 1 && init_cpu_state(&cpu_state[1], 1))
+	if (cpu_count > 1 && init_processor_state(&processor_state[1], 1))
 		goto fail;
 	if (init_backside_state(&backside_state))
 		goto fail;
@@ -2008,8 +1995,6 @@ static int attach_fcu(void)
  */
 static void detach_fcu(void)
 {
-	if (fcu)
-		detach_i2c_chip(fcu);
 	fcu = NULL;
 }
 
@@ -2060,12 +2045,21 @@ static int therm_pm72_attach(struct i2c_adapter *adapter)
 	return 0;
 }
 
+static int therm_pm72_probe(struct i2c_client *client,
+			    const struct i2c_device_id *id)
+{
+	/* Always succeed, the real work was done in therm_pm72_attach() */
+	return 0;
+}
+
 /*
- * Called on every adapter when the driver or the i2c controller
+ * Called when any of the devices which participates into thermal management
  * is going away.
  */
-static int therm_pm72_detach(struct i2c_adapter *adapter)
+static int therm_pm72_remove(struct i2c_client *client)
 {
+	struct i2c_adapter *adapter = client->adapter;
+
 	mutex_lock(&driver_lock);
 
 	if (state != state_detached)
@@ -2095,6 +2089,30 @@ static int therm_pm72_detach(struct i2c_adapter *adapter)
 
 	return 0;
 }
+
+/*
+ * i2c_driver structure to attach to the host i2c controller
+ */
+
+static const struct i2c_device_id therm_pm72_id[] = {
+	/*
+	 * Fake device name, thermal management is done by several
+	 * chips but we don't need to differentiate between them at
+	 * this point.
+	 */
+	{ "therm_pm72", 0 },
+	{ }
+};
+
+static struct i2c_driver therm_pm72_driver = {
+	.driver = {
+		.name	= "therm_pm72",
+	},
+	.attach_adapter	= therm_pm72_attach,
+	.probe		= therm_pm72_probe,
+	.remove		= therm_pm72_remove,
+	.id_table	= therm_pm72_id,
+};
 
 static int fan_check_loc_match(const char *loc, int fan)
 {
@@ -2192,36 +2210,43 @@ static void fcu_lookup_fans(struct device_node *fcu_node)
 	}
 }
 
-static int fcu_of_probe(struct of_device* dev, const struct of_device_id *match)
+static int fcu_of_probe(struct platform_device* dev)
 {
 	state = state_detached;
+	of_dev = dev;
+
+	dev_info(&dev->dev, "PowerMac G5 Thermal control driver %s\n", VERSION);
 
 	/* Lookup the fans in the device tree */
-	fcu_lookup_fans(dev->node);
+	fcu_lookup_fans(dev->dev.of_node);
 
 	/* Add the driver */
 	return i2c_add_driver(&therm_pm72_driver);
 }
 
-static int fcu_of_remove(struct of_device* dev)
+static int fcu_of_remove(struct platform_device* dev)
 {
 	i2c_del_driver(&therm_pm72_driver);
 
 	return 0;
 }
 
-static struct of_device_id fcu_match[] = 
+static const struct of_device_id fcu_match[] = 
 {
 	{
 	.type		= "fcu",
 	},
 	{},
 };
+MODULE_DEVICE_TABLE(of, fcu_match);
 
-static struct of_platform_driver fcu_of_platform_driver = 
+static struct platform_driver fcu_of_platform_driver = 
 {
-	.name 		= "temperature",
-	.match_table	= fcu_match,
+	.driver = {
+		.name = "temperature",
+		.owner = THIS_MODULE,
+		.of_match_table = fcu_match,
+	},
 	.probe		= fcu_of_probe,
 	.remove		= fcu_of_remove
 };
@@ -2231,43 +2256,19 @@ static struct of_platform_driver fcu_of_platform_driver =
  */
 static int __init therm_pm72_init(void)
 {
-	struct device_node *np;
+	rackmac = of_machine_is_compatible("RackMac3,1");
 
-	rackmac = machine_is_compatible("RackMac3,1");
-
-	if (!machine_is_compatible("PowerMac7,2") &&
-	    !machine_is_compatible("PowerMac7,3") &&
+	if (!of_machine_is_compatible("PowerMac7,2") &&
+	    !of_machine_is_compatible("PowerMac7,3") &&
 	    !rackmac)
 	    	return -ENODEV;
 
-	printk(KERN_INFO "PowerMac G5 Thermal control driver %s\n", VERSION);
-
-	np = of_find_node_by_type(NULL, "fcu");
-	if (np == NULL) {
-		/* Some machines have strangely broken device-tree */
-		np = of_find_node_by_path("/u3@0,f8000000/i2c@f8001000/fan@15e");
-		if (np == NULL) {
-			    printk(KERN_ERR "Can't find FCU in device-tree !\n");
-			    return -ENODEV;
-		}
-	}
-	of_dev = of_platform_device_create(np, "temperature", NULL);
-	if (of_dev == NULL) {
-		printk(KERN_ERR "Can't register FCU platform device !\n");
-		return -ENODEV;
-	}
-
-	of_register_platform_driver(&fcu_of_platform_driver);
-	
-	return 0;
+	return platform_driver_register(&fcu_of_platform_driver);
 }
 
 static void __exit therm_pm72_exit(void)
 {
-	of_unregister_platform_driver(&fcu_of_platform_driver);
-
-	if (of_dev)
-		of_device_unregister(of_dev);
+	platform_driver_unregister(&fcu_of_platform_driver);
 }
 
 module_init(therm_pm72_init);

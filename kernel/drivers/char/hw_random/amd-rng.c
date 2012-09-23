@@ -44,8 +44,8 @@
  * want to register another driver on the same PCI id.
  */
 static const struct pci_device_id pci_tbl[] = {
-	{ 0x1022, 0x7443, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
-	{ 0x1022, 0x746b, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
+	{ PCI_VDEVICE(AMD, 0x7443), 0, },
+	{ PCI_VDEVICE(AMD, 0x746b), 0, },
 	{ 0, },	/* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, pci_tbl);
@@ -133,6 +133,12 @@ found:
 	pmbase &= 0x0000FF00;
 	if (pmbase == 0)
 		goto out;
+	if (!request_region(pmbase + 0xF0, 8, "AMD HWRNG")) {
+		dev_err(&pdev->dev, "AMD HWRNG region 0x%x already in use!\n",
+			pmbase + 0xF0);
+		err = -EBUSY;
+		goto out;
+	}
 	amd_rng.priv = (unsigned long)pmbase;
 	amd_pdev = pdev;
 
@@ -141,6 +147,7 @@ found:
 	if (err) {
 		printk(KERN_ERR PFX "RNG registering failed (%d)\n",
 		       err);
+		release_region(pmbase + 0xF0, 8);
 		goto out;
 	}
 out:
@@ -149,6 +156,8 @@ out:
 
 static void __exit mod_exit(void)
 {
+	u32 pmbase = (unsigned long)amd_rng.priv;
+	release_region(pmbase + 0xF0, 8);
 	hwrng_unregister(&amd_rng);
 }
 

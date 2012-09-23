@@ -8,8 +8,6 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#ifdef __ASSEMBLY__
-
 /*
  * Feature section common macros
  *
@@ -23,10 +21,12 @@
 /* 64 bits kernel, 32 bits code (ie. vdso32) */
 #define FTR_ENTRY_LONG		.llong
 #define FTR_ENTRY_OFFSET	.long 0xffffffff; .long
+#elif defined(CONFIG_PPC64)
+#define FTR_ENTRY_LONG		.llong
+#define FTR_ENTRY_OFFSET	.llong
 #else
-/* 64 bit kernel 64 bit code, or 32 bit kernel 32 bit code */
-#define FTR_ENTRY_LONG		PPC_LONG
-#define FTR_ENTRY_OFFSET	PPC_LONG
+#define FTR_ENTRY_LONG		.long
+#define FTR_ENTRY_OFFSET	.long
 #endif
 
 #define START_FTR_SECTION(label)	label##1:
@@ -37,18 +37,21 @@ label##2:						\
 	.align 2;					\
 label##3:
 
-#define MAKE_FTR_SECTION_ENTRY(msk, val, label, sect)	\
-label##4:						\
-	.popsection;					\
-	.pushsection sect,"a";				\
-	.align 3;					\
-label##5:					       	\
-	FTR_ENTRY_LONG msk;				\
-	FTR_ENTRY_LONG val;				\
-	FTR_ENTRY_OFFSET label##1b-label##5b;		\
-	FTR_ENTRY_OFFSET label##2b-label##5b;	 	\
-	FTR_ENTRY_OFFSET label##3b-label##5b;		\
-	FTR_ENTRY_OFFSET label##4b-label##5b;	 	\
+#define MAKE_FTR_SECTION_ENTRY(msk, val, label, sect)		\
+label##4:							\
+	.popsection;						\
+	.pushsection sect,"a";					\
+	.align 3;						\
+label##5:							\
+	FTR_ENTRY_LONG msk;					\
+	FTR_ENTRY_LONG val;					\
+	FTR_ENTRY_OFFSET label##1b-label##5b;			\
+	FTR_ENTRY_OFFSET label##2b-label##5b;			\
+	FTR_ENTRY_OFFSET label##3b-label##5b;			\
+	FTR_ENTRY_OFFSET label##4b-label##5b;			\
+	.ifgt (label##4b- label##3b)-(label##2b- label##1b);	\
+	.error "Feature section else case larger than body";	\
+	.endif;							\
 	.popsection;
 
 
@@ -141,6 +144,34 @@ label##5:					       	\
 #define ALT_FW_FTR_SECTION_END_IFCLR(msk)	\
 	ALT_FW_FTR_SECTION_END_NESTED_IFCLR(msk, 97)
 
+#ifndef __ASSEMBLY__
+
+#define ASM_FTR_IF(section_if, section_else, msk, val)	\
+	stringify_in_c(BEGIN_FTR_SECTION)			\
+	section_if "; "						\
+	stringify_in_c(FTR_SECTION_ELSE)			\
+	section_else "; "					\
+	stringify_in_c(ALT_FTR_SECTION_END((msk), (val)))
+
+#define ASM_FTR_IFSET(section_if, section_else, msk)	\
+	ASM_FTR_IF(section_if, section_else, (msk), (msk))
+
+#define ASM_FTR_IFCLR(section_if, section_else, msk)	\
+	ASM_FTR_IF(section_if, section_else, (msk), 0)
+
+#define ASM_MMU_FTR_IF(section_if, section_else, msk, val)	\
+	stringify_in_c(BEGIN_MMU_FTR_SECTION)			\
+	section_if "; "						\
+	stringify_in_c(MMU_FTR_SECTION_ELSE)			\
+	section_else "; "					\
+	stringify_in_c(ALT_MMU_FTR_SECTION_END((msk), (val)))
+
+#define ASM_MMU_FTR_IFSET(section_if, section_else, msk)	\
+	ASM_MMU_FTR_IF(section_if, section_else, (msk), (msk))
+
+#define ASM_MMU_FTR_IFCLR(section_if, section_else, msk)	\
+	ASM_MMU_FTR_IF(section_if, section_else, (msk), 0)
+
 #endif /* __ASSEMBLY__ */
 
 /* LWSYNC feature sections */
@@ -150,7 +181,7 @@ label##2:						\
 	.pushsection sect,"a";				\
 	.align 2;					\
 label##3:					       	\
-	.long label##1b-label##3b;			\
+	FTR_ENTRY_OFFSET label##1b-label##3b;		\
 	.popsection;
 
 #endif /* __ASM_POWERPC_FEATURE_FIXUPS_H */

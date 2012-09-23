@@ -32,7 +32,11 @@
  *
  */
 
+#define KMSG_COMPONENT "IPVS"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/ip.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/skbuff.h>
@@ -144,7 +148,7 @@ static int ip_vs_sh_init_svc(struct ip_vs_service *svc)
 	tbl = kmalloc(sizeof(struct ip_vs_sh_bucket)*IP_VS_SH_TAB_SIZE,
 		      GFP_ATOMIC);
 	if (tbl == NULL) {
-		IP_VS_ERR("ip_vs_sh_init_svc(): no memory\n");
+		pr_err("%s(): no memory\n", __func__);
 		return -ENOMEM;
 	}
 	svc->sched_data = tbl;
@@ -219,7 +223,7 @@ ip_vs_sh_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 	    || !(dest->flags & IP_VS_DEST_F_AVAILABLE)
 	    || atomic_read(&dest->weight) <= 0
 	    || is_overloaded(dest)) {
-		IP_VS_ERR_RL("SH: no destination available\n");
+		ip_vs_scheduler_err(svc, "no destination available");
 		return NULL;
 	}
 

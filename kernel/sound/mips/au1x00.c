@@ -516,6 +516,7 @@ get the interrupt driven case to work efficiently */
 			break;
 	if (i == 0x5000) {
 		printk(KERN_ERR "au1000 AC97: AC97 command read timeout\n");
+		spin_unlock(&au1000->ac97_lock);
 		return 0;
 	}
 
@@ -636,9 +637,10 @@ au1000_init(void)
 	struct snd_card *card;
 	struct snd_au1000 *au1000;
 
-	card = snd_card_new(-1, "AC97", THIS_MODULE, sizeof(struct snd_au1000));
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(-1, "AC97", THIS_MODULE,
+			      sizeof(struct snd_au1000), &card);
+	if (err < 0)
+		return err;
 
 	card->private_free = snd_au1000_free;
 	au1000 = card->private_data;
@@ -678,7 +680,7 @@ au1000_init(void)
 		return err;
 	}
 
-	printk( KERN_INFO "ALSA AC97: Driver Initialized\n" );
+	printk(KERN_INFO "ALSA AC97: Driver Initialized\n");
 	au1000_card = card;
 	return 0;
 }

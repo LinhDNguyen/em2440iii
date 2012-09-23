@@ -72,10 +72,7 @@ static void sym_printl_hex(u_char *p, int n)
 
 static void sym_print_msg(struct sym_ccb *cp, char *label, u_char *msg)
 {
-	if (label)
-		sym_print_addr(cp->cmd, "%s: ", label);
-	else
-		sym_print_addr(cp->cmd, "");
+	sym_print_addr(cp->cmd, "%s: ", label);
 
 	spi_print_msg(msg);
 	printf("\n");
@@ -1896,6 +1893,15 @@ void sym_start_up(struct Scsi_Host *shost, int reason)
 		tp->head.sval = 0;
 		tp->head.wval = np->rv_scntl3;
 		tp->head.uval = 0;
+		if (tp->lun0p)
+			tp->lun0p->to_clear = 0;
+		if (tp->lunmp) {
+			int ln;
+
+			for (ln = 1; ln < SYM_CONF_MAX_LUN; ln++)
+				if (tp->lunmp[ln])
+					tp->lunmp[ln]->to_clear = 0;
+		}
 	}
 
 	/*
@@ -2451,7 +2457,7 @@ static void sym_int_ma (struct sym_hcb *np)
 		}
 
 		/*
-		 *  The data in the dma fifo has not been transfered to
+		 *  The data in the dma fifo has not been transferred to
 		 *  the target -> add the amount to the rest
 		 *  and clear the data.
 		 *  Check the sstat2 register in case of wide transfer.
@@ -2683,7 +2689,7 @@ static void sym_int_ma (struct sym_hcb *np)
 	 *  we force a SIR_NEGO_PROTO interrupt (it is a hack that avoids 
 	 *  bloat for such a should_not_happen situation).
 	 *  In all other situation, we reset the BUS.
-	 *  Are these assumptions reasonnable ? (Wait and see ...)
+	 *  Are these assumptions reasonable ? (Wait and see ...)
 	 */
 unexpected_phase:
 	dsp -= 8;
@@ -4549,7 +4555,8 @@ static void sym_int_sir(struct sym_hcb *np)
 			switch (np->msgin [2]) {
 			case M_X_MODIFY_DP:
 				if (DEBUG_FLAGS & DEBUG_POINTER)
-					sym_print_msg(cp, NULL, np->msgin);
+					sym_print_msg(cp, "extended msg ",
+						      np->msgin);
 				tmp = (np->msgin[3]<<24) + (np->msgin[4]<<16) + 
 				      (np->msgin[5]<<8)  + (np->msgin[6]);
 				sym_modify_dp(np, tp, cp, tmp);
@@ -4576,7 +4583,7 @@ static void sym_int_sir(struct sym_hcb *np)
 		 */
 		case M_IGN_RESIDUE:
 			if (DEBUG_FLAGS & DEBUG_POINTER)
-				sym_print_msg(cp, NULL, np->msgin);
+				sym_print_msg(cp, "1 or 2 byte ", np->msgin);
 			if (cp->host_flags & HF_SENSE)
 				OUTL_DSP(np, SCRIPTA_BA(np, clrack));
 			else
@@ -4989,7 +4996,7 @@ struct sym_lcb *sym_alloc_lcb (struct sym_hcb *np, u_char tn, u_char ln)
 	 */
 	if (ln && !tp->lunmp) {
 		tp->lunmp = kcalloc(SYM_CONF_MAX_LUN, sizeof(struct sym_lcb *),
-				GFP_KERNEL);
+				GFP_ATOMIC);
 		if (!tp->lunmp)
 			goto fail;
 	}
@@ -5009,6 +5016,7 @@ struct sym_lcb *sym_alloc_lcb (struct sym_hcb *np, u_char tn, u_char ln)
 		tp->lun0p = lp;
 		tp->head.lun0_sa = cpu_to_scr(vtobus(lp));
 	}
+	tp->nlcb++;
 
 	/*
 	 *  Let the itl task point to error handling.
@@ -5083,6 +5091,43 @@ static void sym_alloc_lcb_tags (struct sym_hcb *np, u_char tn, u_char ln)
 	return;
 fail:
 	return;
+}
+
+/*
+ *  Lun control block deallocation. Returns the number of valid remaining LCBs
+ *  for the target.
+ */
+int sym_free_lcb(struct sym_hcb *np, u_char tn, u_char ln)
+{
+	struct sym_tcb *tp = &np->target[tn];
+	struct sym_lcb *lp = sym_lp(tp, ln);
+
+	tp->nlcb--;
+
+	if (ln) {
+		if (!tp->nlcb) {
+			kfree(tp->lunmp);
+			sym_mfree_dma(tp->luntbl, 256, "LUNTBL");
+			tp->lunmp = NULL;
+			tp->luntbl = NULL;
+			tp->head.luntbl_sa = cpu_to_scr(vtobus(np->badluntbl));
+		} else {
+			tp->luntbl[ln] = cpu_to_scr(vtobus(&np->badlun_sa));
+			tp->lunmp[ln] = NULL;
+		}
+	} else {
+		tp->lun0p = NULL;
+		tp->head.lun0_sa = cpu_to_scr(vtobus(&np->badlun_sa));
+	}
+
+	if (lp->itlq_tbl) {
+		sym_mfree_dma(lp->itlq_tbl, SYM_CONF_MAX_TASK*4, "ITLQ_TBL");
+		kfree(lp->cb_tags);
+	}
+
+	sym_mfree_dma(lp, sizeof(*lp), "LCB");
+
+	return tp->nlcb;
 }
 
 /*

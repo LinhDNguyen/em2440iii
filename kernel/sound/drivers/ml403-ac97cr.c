@@ -39,6 +39,7 @@
 #include <linux/platform_device.h>
 
 #include <linux/ioport.h>
+#include <linux/slab.h>
 #include <linux/io.h>
 #include <linux/interrupt.h>
 
@@ -1142,8 +1143,8 @@ snd_ml403_ac97cr_create(struct snd_card *card, struct platform_device *pfdev,
 					     (resource->start) + 1);
 	if (ml403_ac97cr->port == NULL) {
 		snd_printk(KERN_ERR SND_ML403_AC97CR_DRIVER ": "
-			   "unable to remap memory region (%x to %x)\n",
-			   resource->start, resource->end);
+			   "unable to remap memory region (%pR)\n",
+			   resource);
 		snd_ml403_ac97cr_free(ml403_ac97cr);
 		return -EBUSY;
 	}
@@ -1279,9 +1280,9 @@ static int __devinit snd_ml403_ac97cr_probe(struct platform_device *pfdev)
 	if (!enable[dev])
 		return -ENOENT;
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 	err = snd_ml403_ac97cr_create(card, pfdev, &ml403_ac97cr);
 	if (err < 0) {
 		PDEBUG(INIT_FAILURE, "probe(): create failed!\n");

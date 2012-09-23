@@ -20,6 +20,7 @@
  */
 
 #include <linux/time.h>
+#include <linux/gcd.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/timer.h>
@@ -27,22 +28,6 @@
 /*
  *  Timer functions
  */
-
-/* Greatest common divisor */
-static unsigned long gcd(unsigned long a, unsigned long b)
-{
-	unsigned long r;
-	if (a < b) {
-		r = a;
-		a = b;
-		b = r;
-	}
-	while ((r = a % b) != 0) {
-		a = b;
-		b = r;
-	}
-	return b;
-}
 
 void snd_pcm_timer_resolution_change(struct snd_pcm_substream *substream)
 {
@@ -85,25 +70,19 @@ static unsigned long snd_pcm_timer_resolution(struct snd_timer * timer)
 
 static int snd_pcm_timer_start(struct snd_timer * timer)
 {
-	unsigned long flags;
 	struct snd_pcm_substream *substream;
 	
 	substream = snd_timer_chip(timer);
-	spin_lock_irqsave(&substream->timer_lock, flags);
 	substream->timer_running = 1;
-	spin_unlock_irqrestore(&substream->timer_lock, flags);
 	return 0;
 }
 
 static int snd_pcm_timer_stop(struct snd_timer * timer)
 {
-	unsigned long flags;
 	struct snd_pcm_substream *substream;
 	
 	substream = snd_timer_chip(timer);
-	spin_lock_irqsave(&substream->timer_lock, flags);
 	substream->timer_running = 0;
-	spin_unlock_irqrestore(&substream->timer_lock, flags);
 	return 0;
 }
 

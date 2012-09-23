@@ -20,20 +20,6 @@
  * loudness - set between 0 and 15 for varying degrees of loudness effect
  *
  * maxvol   - set maximium volume to +20db (1), default is 0db(0)
- *
- *
- *  Revision: 0.7 - maxvol module parm to set maximium volume 0db or +20db
- *  				store if muted so we can return it
- *  				change balance only if flaged to
- *  Revision: 0.6 - added tone controls
- *  Revision: 0.5 - Fixed odd balance problem
- *  Revision: 0.4 - added muting
- *  Revision: 0.3 - Fixed silly reversed volume controls.  :)
- *  Revision: 0.2 - Cleaned up #defines
- *			fixed volume control
- *          Added I2C_DRIVERID_TDA7432
- *			added loudness insmod control
- *  Revision: 0.1 - initial version
  */
 
 #include <linux/module.h>
@@ -50,7 +36,6 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/i2c-addr.h>
-#include <media/v4l2-i2c-drv.h>
 
 #ifndef VIDEO_AUDIO_BALANCE
 # define VIDEO_AUDIO_BALANCE 32
@@ -64,10 +49,11 @@ static int maxvol;
 static int loudness; /* disable loudness by default */
 static int debug;	 /* insmod parameter */
 module_param(debug, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(debug, "Set debugging level from 0 to 3. Default is off(0).");
 module_param(loudness, int, S_IRUGO);
-MODULE_PARM_DESC(maxvol,"Set maximium volume to +20db (0), default is 0db(1)");
+MODULE_PARM_DESC(loudness, "Turn loudness on(1) else off(0). Default is off(0).");
 module_param(maxvol, int, S_IRUGO | S_IWUSR);
-
+MODULE_PARM_DESC(maxvol, "Set maximium volume to +20dB(0) else +0dB(1). Default is +20dB(0).");
 
 
 /* Structure of address and subaddresses for the tda7432 */
@@ -486,9 +472,25 @@ static const struct i2c_device_id tda7432_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, tda7432_id);
 
-static struct v4l2_i2c_driver_data v4l2_i2c_data = {
-	.name = "tda7432",
-	.probe = tda7432_probe,
-	.remove = tda7432_remove,
-	.id_table = tda7432_id,
+static struct i2c_driver tda7432_driver = {
+	.driver = {
+		.owner	= THIS_MODULE,
+		.name	= "tda7432",
+	},
+	.probe		= tda7432_probe,
+	.remove		= tda7432_remove,
+	.id_table	= tda7432_id,
 };
+
+static __init int init_tda7432(void)
+{
+	return i2c_add_driver(&tda7432_driver);
+}
+
+static __exit void exit_tda7432(void)
+{
+	i2c_del_driver(&tda7432_driver);
+}
+
+module_init(init_tda7432);
+module_exit(exit_tda7432);

@@ -9,6 +9,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
+#include <linux/smp.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/cpumask.h>
@@ -92,7 +93,7 @@ static void __cpuinit per_hub_init(cnodeid_t cnode)
 
 	/*
 	 * Some interrupts are reserved by hardware or by software convention.
-	 * Mark these as reserved right away so they won't be used accidently
+	 * Mark these as reserved right away so they won't be used accidentally
 	 * later.
 	 */
 	for (i = 0; i <= BASE_PCI_IRQ; i++) {

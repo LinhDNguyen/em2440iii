@@ -1,9 +1,8 @@
 /*
- *  drivers/s390/char/sclp_cmd.c
+ * Copyright IBM Corp. 2007, 2009
  *
- *    Copyright IBM Corp. 2007
- *    Author(s): Heiko Carstens <heiko.carstens@de.ibm.com>,
- *		 Peter Oberparleiter <peter.oberparleiter@de.ibm.com>
+ * Author(s): Heiko Carstens <heiko.carstens@de.ibm.com>,
+ *	      Peter Oberparleiter <peter.oberparleiter@de.ibm.com>
  */
 
 #define KMSG_COMPONENT "sclp_cmd"
@@ -12,11 +11,13 @@
 #include <linux/completion.h>
 #include <linux/init.h>
 #include <linux/errno.h>
+#include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/mmzone.h>
 #include <linux/memory.h>
+#include <linux/platform_device.h>
 #include <asm/chpid.h>
 #include <asm/sclp.h>
 #include <asm/setup.h>
@@ -83,6 +84,7 @@ static void __init sclp_read_info_early(void)
 		do {
 			memset(sccb, 0, sizeof(*sccb));
 			sccb->header.length = sizeof(*sccb);
+			sccb->header.function_code = 0x80;
 			sccb->header.control_mask[2] = 0x80;
 			rc = sclp_cmd_sync_early(commands[i], sccb);
 		} while (rc == -EBUSY);
@@ -292,6 +294,7 @@ static DEFINE_MUTEX(sclp_mem_mutex);
 static LIST_HEAD(sclp_mem_list);
 static u8 sclp_max_storage_id;
 static unsigned long sclp_storage_ids[256 / BITS_PER_LONG];
+static int sclp_mem_state_changed;
 
 struct memory_increment {
 	struct list_head list;
@@ -304,6 +307,13 @@ struct assign_storage_sccb {
 	struct sccb_header header;
 	u16 rn;
 } __packed;
+
+int arch_get_memory_phys_device(unsigned long start_pfn)
+{
+	if (!rzm)
+		return 0;
+	return PFN_PHYS(start_pfn) >> ilog2(rzm);
+}
 
 static unsigned long long rn2addr(u16 rn)
 {
@@ -373,8 +383,10 @@ static int sclp_attach_storage(u8 id)
 	switch (sccb->header.response_code) {
 	case 0x0020:
 		set_bit(id, sclp_storage_ids);
-		for (i = 0; i < sccb->assigned; i++)
-			sclp_unassign_storage(sccb->entries[i] >> 16);
+		for (i = 0; i < sccb->assigned; i++) {
+			if (sccb->entries[i])
+				sclp_unassign_storage(sccb->entries[i] >> 16);
+		}
 		break;
 	default:
 		rc = -EIO;
@@ -450,6 +462,8 @@ static int sclp_mem_notifier(struct notifier_block *nb,
 		rc = -EINVAL;
 		break;
 	}
+	if (!rc)
+		sclp_mem_state_changed = 1;
 	mutex_unlock(&sclp_mem_mutex);
 	return rc ? NOTIFY_BAD : NOTIFY_OK;
 }
@@ -506,6 +520,8 @@ static void __init insert_increment(u16 rn, int standby, int assigned)
 		return;
 	new_incr->rn = rn;
 	new_incr->standby = standby;
+	if (!standby)
+		new_incr->usecount = 1;
 	last_rn = 0;
 	prev = &sclp_mem_list;
 	list_for_each_entry(incr, &sclp_mem_list, list) {
@@ -525,6 +541,14 @@ static void __init insert_increment(u16 rn, int standby, int assigned)
 	list_add(&new_incr->list, prev);
 }
 
+static int sclp_mem_freeze(struct device *dev)
+{
+	if (!sclp_mem_state_changed)
+		return 0;
+	pr_err("Memory hotplug state changed, suspend refused.\n");
+	return -EPERM;
+}
+
 struct read_storage_sccb {
 	struct sccb_header header;
 	u16 max_id;
@@ -534,8 +558,20 @@ struct read_storage_sccb {
 	u32 entries[0];
 } __packed;
 
+static const struct dev_pm_ops sclp_mem_pm_ops = {
+	.freeze		= sclp_mem_freeze,
+};
+
+static struct platform_driver sclp_mem_pdrv = {
+	.driver = {
+		.name	= "sclp_mem",
+		.pm	= &sclp_mem_pm_ops,
+	},
+};
+
 static int __init sclp_detect_standby_memory(void)
 {
+	struct platform_device *sclp_pdev;
 	struct read_storage_sccb *sccb;
 	int i, id, assigned, rc;
 
@@ -588,7 +624,17 @@ static int __init sclp_detect_standby_memory(void)
 	rc = register_memory_notifier(&sclp_mem_nb);
 	if (rc)
 		goto out;
+	rc = platform_driver_register(&sclp_mem_pdrv);
+	if (rc)
+		goto out;
+	sclp_pdev = platform_device_register_simple("sclp_mem", -1, NULL, 0);
+	rc = IS_ERR(sclp_pdev) ? PTR_ERR(sclp_pdev) : 0;
+	if (rc)
+		goto out_driver;
 	sclp_add_standby_memory();
+	goto out;
+out_driver:
+	platform_driver_unregister(&sclp_mem_pdrv);
 out:
 	free_page((unsigned long) sccb);
 	return rc;

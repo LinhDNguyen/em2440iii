@@ -181,25 +181,6 @@ static void snd_wss_wait(struct snd_wss *chip)
 		udelay(100);
 }
 
-static void snd_wss_outm(struct snd_wss *chip, unsigned char reg,
-			    unsigned char mask, unsigned char value)
-{
-	unsigned char tmp = (chip->image[reg] & mask) | value;
-
-	snd_wss_wait(chip);
-#ifdef CONFIG_SND_DEBUG
-	if (wss_inb(chip, CS4231P(REGSEL)) & CS4231_INIT)
-		snd_printk("outm: auto calibration time out - reg = 0x%x, value = 0x%x\n", reg, value);
-#endif
-	chip->image[reg] = tmp;
-	if (!chip->calibrate_mute) {
-		wss_outb(chip, CS4231P(REGSEL), chip->mce_bit | reg);
-		wmb();
-		wss_outb(chip, CS4231P(REG), tmp);
-		mb();
-	}
-}
-
 static void snd_wss_dout(struct snd_wss *chip, unsigned char reg,
 			 unsigned char value)
 {
@@ -219,7 +200,8 @@ void snd_wss_out(struct snd_wss *chip, unsigned char reg, unsigned char value)
 	snd_wss_wait(chip);
 #ifdef CONFIG_SND_DEBUG
 	if (wss_inb(chip, CS4231P(REGSEL)) & CS4231_INIT)
-		snd_printk("out: auto calibration time out - reg = 0x%x, value = 0x%x\n", reg, value);
+		snd_printk(KERN_DEBUG "out: auto calibration time out "
+			   "- reg = 0x%x, value = 0x%x\n", reg, value);
 #endif
 	wss_outb(chip, CS4231P(REGSEL), chip->mce_bit | reg);
 	wss_outb(chip, CS4231P(REG), value);
@@ -235,7 +217,8 @@ unsigned char snd_wss_in(struct snd_wss *chip, unsigned char reg)
 	snd_wss_wait(chip);
 #ifdef CONFIG_SND_DEBUG
 	if (wss_inb(chip, CS4231P(REGSEL)) & CS4231_INIT)
-		snd_printk("in: auto calibration time out - reg = 0x%x\n", reg);
+		snd_printk(KERN_DEBUG "in: auto calibration time out "
+			   "- reg = 0x%x\n", reg);
 #endif
 	wss_outb(chip, CS4231P(REGSEL), chip->mce_bit | reg);
 	mb();
@@ -252,7 +235,7 @@ void snd_cs4236_ext_out(struct snd_wss *chip, unsigned char reg,
 	wss_outb(chip, CS4231P(REG), val);
 	chip->eimage[CS4236_REG(reg)] = val;
 #if 0
-	printk("ext out : reg = 0x%x, val = 0x%x\n", reg, val);
+	printk(KERN_DEBUG "ext out : reg = 0x%x, val = 0x%x\n", reg, val);
 #endif
 }
 EXPORT_SYMBOL(snd_cs4236_ext_out);
@@ -268,7 +251,8 @@ unsigned char snd_cs4236_ext_in(struct snd_wss *chip, unsigned char reg)
 	{
 		unsigned char res;
 		res = wss_inb(chip, CS4231P(REG));
-		printk("ext in : reg = 0x%x, val = 0x%x\n", reg, res);
+		printk(KERN_DEBUG "ext in : reg = 0x%x, val = 0x%x\n",
+		       reg, res);
 		return res;
 	}
 #endif
@@ -394,13 +378,16 @@ void snd_wss_mce_up(struct snd_wss *chip)
 	snd_wss_wait(chip);
 #ifdef CONFIG_SND_DEBUG
 	if (wss_inb(chip, CS4231P(REGSEL)) & CS4231_INIT)
-		snd_printk("mce_up - auto calibration time out (0)\n");
+		snd_printk(KERN_DEBUG
+			   "mce_up - auto calibration time out (0)\n");
 #endif
 	spin_lock_irqsave(&chip->reg_lock, flags);
 	chip->mce_bit |= CS4231_MCE;
 	timeout = wss_inb(chip, CS4231P(REGSEL));
 	if (timeout == 0x80)
-		snd_printk("mce_up [0x%lx]: serious init problem - codec still busy\n", chip->port);
+		snd_printk(KERN_DEBUG "mce_up [0x%lx]: "
+			   "serious init problem - codec still busy\n",
+			   chip->port);
 	if (!(timeout & CS4231_MCE))
 		wss_outb(chip, CS4231P(REGSEL),
 			 chip->mce_bit | (timeout & 0x1f));
@@ -419,7 +406,9 @@ void snd_wss_mce_down(struct snd_wss *chip)
 
 #ifdef CONFIG_SND_DEBUG
 	if (wss_inb(chip, CS4231P(REGSEL)) & CS4231_INIT)
-		snd_printk("mce_down [0x%lx] - auto calibration time out (0)\n", (long)CS4231P(REGSEL));
+		snd_printk(KERN_DEBUG "mce_down [0x%lx] - "
+			   "auto calibration time out (0)\n",
+			   (long)CS4231P(REGSEL));
 #endif
 	spin_lock_irqsave(&chip->reg_lock, flags);
 	chip->mce_bit &= ~CS4231_MCE;
@@ -427,13 +416,15 @@ void snd_wss_mce_down(struct snd_wss *chip)
 	wss_outb(chip, CS4231P(REGSEL), chip->mce_bit | (timeout & 0x1f));
 	spin_unlock_irqrestore(&chip->reg_lock, flags);
 	if (timeout == 0x80)
-		snd_printk("mce_down [0x%lx]: serious init problem - codec still busy\n", chip->port);
+		snd_printk(KERN_DEBUG "mce_down [0x%lx]: "
+			   "serious init problem - codec still busy\n",
+			   chip->port);
 	if ((timeout & CS4231_MCE) == 0 || !(chip->hardware & hw_mask))
 		return;
 
 	/*
 	 * Wait for (possible -- during init auto-calibration may not be set)
-	 * calibration process to start. Needs upto 5 sample periods on AD1848
+	 * calibration process to start. Needs up to 5 sample periods on AD1848
 	 * which at the slowest possible rate of 5.5125 kHz means 907 us.
 	 */
 	msleep(1);
@@ -565,7 +556,7 @@ static unsigned char snd_wss_get_format(struct snd_wss *chip,
 	if (channels > 1)
 		rformat |= CS4231_STEREO;
 #if 0
-	snd_printk("get_format: 0x%x (mode=0x%x)\n", format, mode);
+	snd_printk(KERN_DEBUG "get_format: 0x%x (mode=0x%x)\n", format, mode);
 #endif
 	return rformat;
 }
@@ -587,7 +578,15 @@ static void snd_wss_calibrate_mute(struct snd_wss *chip, int mute)
 			     chip->image[CS4231_RIGHT_INPUT]);
 		snd_wss_dout(chip, CS4231_LOOPBACK,
 			     chip->image[CS4231_LOOPBACK]);
+	} else {
+		snd_wss_dout(chip, CS4231_LEFT_INPUT,
+			     0);
+		snd_wss_dout(chip, CS4231_RIGHT_INPUT,
+			     0);
+		snd_wss_dout(chip, CS4231_LOOPBACK,
+			     0xfd);
 	}
+
 	snd_wss_dout(chip, CS4231_AUX1_LEFT_INPUT,
 		     mute | chip->image[CS4231_AUX1_LEFT_INPUT]);
 	snd_wss_dout(chip, CS4231_AUX1_RIGHT_INPUT,
@@ -630,7 +629,6 @@ static void snd_wss_playback_format(struct snd_wss *chip,
 	int full_calib = 1;
 
 	mutex_lock(&chip->mce_mutex);
-	snd_wss_calibrate_mute(chip, 1);
 	if (chip->hardware == WSS_HW_CS4231A ||
 	    (chip->hardware & WSS_HW_CS4232_MASK)) {
 		spin_lock_irqsave(&chip->reg_lock, flags);
@@ -645,6 +643,24 @@ static void snd_wss_playback_format(struct snd_wss *chip,
 			udelay(100); /* Fixes audible clicks at least on GUS MAX */
 			full_calib = 0;
 		}
+		spin_unlock_irqrestore(&chip->reg_lock, flags);
+	} else if (chip->hardware == WSS_HW_AD1845) {
+		unsigned rate = params_rate(params);
+
+		/*
+		 * Program the AD1845 correctly for the playback stream.
+		 * Note that we do NOT need to toggle the MCE bit because
+		 * the PLAYBACK_ENABLE bit of the Interface Configuration
+		 * register is set.
+		 *
+		 * NOTE: We seem to need to write to the MSB before the LSB
+		 *       to get the correct sample frequency.
+		 */
+		spin_lock_irqsave(&chip->reg_lock, flags);
+		snd_wss_out(chip, CS4231_PLAYBK_FORMAT, (pdfr & 0xf0));
+		snd_wss_out(chip, AD1845_UPR_FREQ_SEL, (rate >> 8) & 0xff);
+		snd_wss_out(chip, AD1845_LWR_FREQ_SEL, rate & 0xff);
+		full_calib = 0;
 		spin_unlock_irqrestore(&chip->reg_lock, flags);
 	}
 	if (full_calib) {
@@ -663,7 +679,6 @@ static void snd_wss_playback_format(struct snd_wss *chip,
 			udelay(100);	/* this seems to help */
 		snd_wss_mce_down(chip);
 	}
-	snd_wss_calibrate_mute(chip, 0);
 	mutex_unlock(&chip->mce_mutex);
 }
 
@@ -675,7 +690,6 @@ static void snd_wss_capture_format(struct snd_wss *chip,
 	int full_calib = 1;
 
 	mutex_lock(&chip->mce_mutex);
-	snd_wss_calibrate_mute(chip, 1);
 	if (chip->hardware == WSS_HW_CS4231A ||
 	    (chip->hardware & WSS_HW_CS4232_MASK)) {
 		spin_lock_irqsave(&chip->reg_lock, flags);
@@ -689,6 +703,24 @@ static void snd_wss_capture_format(struct snd_wss *chip,
 				chip->image[CS4231_ALT_FEATURE_1] &= ~0x20);
 			full_calib = 0;
 		}
+		spin_unlock_irqrestore(&chip->reg_lock, flags);
+	} else if (chip->hardware == WSS_HW_AD1845) {
+		unsigned rate = params_rate(params);
+
+		/*
+		 * Program the AD1845 correctly for the capture stream.
+		 * Note that we do NOT need to toggle the MCE bit because
+		 * the PLAYBACK_ENABLE bit of the Interface Configuration
+		 * register is set.
+		 *
+		 * NOTE: We seem to need to write to the MSB before the LSB
+		 *       to get the correct sample frequency.
+		 */
+		spin_lock_irqsave(&chip->reg_lock, flags);
+		snd_wss_out(chip, CS4231_REC_FORMAT, (cdfr & 0xf0));
+		snd_wss_out(chip, AD1845_UPR_FREQ_SEL, (rate >> 8) & 0xff);
+		snd_wss_out(chip, AD1845_LWR_FREQ_SEL, rate & 0xff);
+		full_calib = 0;
 		spin_unlock_irqrestore(&chip->reg_lock, flags);
 	}
 	if (full_calib) {
@@ -714,7 +746,6 @@ static void snd_wss_capture_format(struct snd_wss *chip,
 		spin_unlock_irqrestore(&chip->reg_lock, flags);
 		snd_wss_mce_down(chip);
 	}
-	snd_wss_calibrate_mute(chip, 0);
 	mutex_unlock(&chip->mce_mutex);
 }
 
@@ -771,10 +802,11 @@ static void snd_wss_init(struct snd_wss *chip)
 {
 	unsigned long flags;
 
+	snd_wss_calibrate_mute(chip, 1);
 	snd_wss_mce_down(chip);
 
 #ifdef SNDRV_DEBUG_MCE
-	snd_printk("init: (1)\n");
+	snd_printk(KERN_DEBUG "init: (1)\n");
 #endif
 	snd_wss_mce_up(chip);
 	spin_lock_irqsave(&chip->reg_lock, flags);
@@ -789,18 +821,20 @@ static void snd_wss_init(struct snd_wss *chip)
 	snd_wss_mce_down(chip);
 
 #ifdef SNDRV_DEBUG_MCE
-	snd_printk("init: (2)\n");
+	snd_printk(KERN_DEBUG "init: (2)\n");
 #endif
 
 	snd_wss_mce_up(chip);
 	spin_lock_irqsave(&chip->reg_lock, flags);
+	chip->image[CS4231_IFACE_CTRL] &= ~CS4231_AUTOCALIB;
+	snd_wss_out(chip, CS4231_IFACE_CTRL, chip->image[CS4231_IFACE_CTRL]);
 	snd_wss_out(chip,
 		    CS4231_ALT_FEATURE_1, chip->image[CS4231_ALT_FEATURE_1]);
 	spin_unlock_irqrestore(&chip->reg_lock, flags);
 	snd_wss_mce_down(chip);
 
 #ifdef SNDRV_DEBUG_MCE
-	snd_printk("init: (3) - afei = 0x%x\n",
+	snd_printk(KERN_DEBUG "init: (3) - afei = 0x%x\n",
 		   chip->image[CS4231_ALT_FEATURE_1]);
 #endif
 
@@ -817,7 +851,7 @@ static void snd_wss_init(struct snd_wss *chip)
 	snd_wss_mce_down(chip);
 
 #ifdef SNDRV_DEBUG_MCE
-	snd_printk("init: (4)\n");
+	snd_printk(KERN_DEBUG "init: (4)\n");
 #endif
 
 	snd_wss_mce_up(chip);
@@ -827,9 +861,10 @@ static void snd_wss_init(struct snd_wss *chip)
 			    chip->image[CS4231_REC_FORMAT]);
 	spin_unlock_irqrestore(&chip->reg_lock, flags);
 	snd_wss_mce_down(chip);
+	snd_wss_calibrate_mute(chip, 0);
 
 #ifdef SNDRV_DEBUG_MCE
-	snd_printk("init: (5)\n");
+	snd_printk(KERN_DEBUG "init: (5)\n");
 #endif
 }
 
@@ -885,8 +920,6 @@ static void snd_wss_close(struct snd_wss *chip, unsigned int mode)
 		mutex_unlock(&chip->open_mutex);
 		return;
 	}
-	snd_wss_calibrate_mute(chip, 1);
-
 	/* disable IRQ */
 	spin_lock_irqsave(&chip->reg_lock, flags);
 	if (!(chip->hardware & WSS_HW_AD1848_MASK))
@@ -918,8 +951,6 @@ static void snd_wss_close(struct snd_wss *chip, unsigned int mode)
 	wss_outb(chip, CS4231P(STATUS), 0);	/* clear IRQ */
 	wss_outb(chip, CS4231P(STATUS), 0);	/* clear IRQ */
 	spin_unlock_irqrestore(&chip->reg_lock, flags);
-
-	snd_wss_calibrate_mute(chip, 0);
 
 	chip->mode = 0;
 	mutex_unlock(&chip->open_mutex);
@@ -1113,7 +1144,7 @@ irqreturn_t snd_wss_interrupt(int irq, void *dev_id)
 	if (chip->hardware & WSS_HW_AD1848_MASK)
 		wss_outb(chip, CS4231P(STATUS), 0);
 	else
-		snd_wss_outm(chip, CS4231_IRQ_STATUS, status, 0);
+		snd_wss_out(chip, CS4231_IRQ_STATUS, status);
 	spin_unlock(&chip->reg_lock);
 	return IRQ_HANDLED;
 }
@@ -1278,7 +1309,8 @@ static int snd_wss_probe(struct snd_wss *chip)
 		} else if (rev == 0x03) {
 			chip->hardware = WSS_HW_CS4236B;
 		} else {
-			snd_printk("unknown CS chip with version 0x%x\n", rev);
+			snd_printk(KERN_ERR
+				   "unknown CS chip with version 0x%x\n", rev);
 			return -ENODEV;		/* unknown CS4231 chip? */
 		}
 	}
@@ -1314,6 +1346,10 @@ static int snd_wss_probe(struct snd_wss *chip)
 		chip->image[CS4231_ALT_FEATURE_2] =
 			chip->hardware == WSS_HW_INTERWAVE ? 0xc2 : 0x01;
 	}
+	/* enable fine grained frequency selection */
+	if (chip->hardware == WSS_HW_AD1845)
+		chip->image[AD1845_PWR_DOWN] = 8;
+
 	ptr = (unsigned char *) &chip->image;
 	regnum = (chip->hardware & WSS_HW_AD1848_MASK) ? 16 : 32;
 	snd_wss_mce_down(chip);
@@ -1342,7 +1378,10 @@ static int snd_wss_probe(struct snd_wss *chip)
 				case 6:
 					break;
 				default:
-					snd_printk("unknown CS4235 chip (enhanced version = 0x%x)\n", id);
+					snd_printk(KERN_WARNING
+						"unknown CS4235 chip "
+						"(enhanced version = 0x%x)\n",
+						id);
 				}
 			} else if ((id & 0x1f) == 0x0b) {	/* CS4236/B */
 				switch (id >> 5) {
@@ -1353,7 +1392,10 @@ static int snd_wss_probe(struct snd_wss *chip)
 					chip->hardware = WSS_HW_CS4236B;
 					break;
 				default:
-					snd_printk("unknown CS4236 chip (enhanced version = 0x%x)\n", id);
+					snd_printk(KERN_WARNING
+						"unknown CS4236 chip "
+						"(enhanced version = 0x%x)\n",
+						id);
 				}
 			} else if ((id & 0x1f) == 0x08) {	/* CS4237B */
 				chip->hardware = WSS_HW_CS4237B;
@@ -1364,7 +1406,10 @@ static int snd_wss_probe(struct snd_wss *chip)
 				case 7:
 					break;
 				default:
-					snd_printk("unknown CS4237B chip (enhanced version = 0x%x)\n", id);
+					snd_printk(KERN_WARNING
+						"unknown CS4237B chip "
+						"(enhanced version = 0x%x)\n",
+						id);
 				}
 			} else if ((id & 0x1f) == 0x09) {	/* CS4238B */
 				chip->hardware = WSS_HW_CS4238B;
@@ -1374,7 +1419,10 @@ static int snd_wss_probe(struct snd_wss *chip)
 				case 7:
 					break;
 				default:
-					snd_printk("unknown CS4238B chip (enhanced version = 0x%x)\n", id);
+					snd_printk(KERN_WARNING
+						"unknown CS4238B chip "
+						"(enhanced version = 0x%x)\n",
+						id);
 				}
 			} else if ((id & 0x1f) == 0x1e) {	/* CS4239 */
 				chip->hardware = WSS_HW_CS4239;
@@ -1384,10 +1432,15 @@ static int snd_wss_probe(struct snd_wss *chip)
 				case 6:
 					break;
 				default:
-					snd_printk("unknown CS4239 chip (enhanced version = 0x%x)\n", id);
+					snd_printk(KERN_WARNING
+						"unknown CS4239 chip "
+						"(enhanced version = 0x%x)\n",
+						id);
 				}
 			} else {
-				snd_printk("unknown CS4236/CS423xB chip (enhanced version = 0x%x)\n", id);
+				snd_printk(KERN_WARNING
+					   "unknown CS4236/CS423xB chip "
+					   "(enhanced version = 0x%x)\n", id);
 			}
 		}
 	}
@@ -1618,7 +1671,8 @@ static void snd_wss_resume(struct snd_wss *chip)
 	wss_outb(chip, CS4231P(REGSEL), chip->mce_bit | (timeout & 0x1f));
 	spin_unlock_irqrestore(&chip->reg_lock, flags);
 	if (timeout == 0x80)
-		snd_printk("down [0x%lx]: serious init problem - codec still busy\n", chip->port);
+		snd_printk(KERN_ERR "down [0x%lx]: serious init problem "
+			   "- codec still busy\n", chip->port);
 	if ((timeout & CS4231_MCE) == 0 ||
 	    !(chip->hardware & (WSS_HW_CS4231_MASK | WSS_HW_CS4232_MASK))) {
 		return;
@@ -1820,7 +1874,8 @@ int snd_wss_create(struct snd_card *card,
 #if 0
 	if (chip->hardware & WSS_HW_CS4232_MASK) {
 		if (chip->res_cport == NULL)
-			snd_printk("CS4232 control port features are not accessible\n");
+			snd_printk(KERN_ERR "CS4232 control port features are "
+				   "not accessible\n");
 	}
 #endif
 
@@ -1959,6 +2014,7 @@ static int snd_wss_info_mux(struct snd_kcontrol *kcontrol,
 	case WSS_HW_INTERWAVE:
 		ptexts = gusmax_texts;
 		break;
+	case WSS_HW_OPTI93X:
 	case WSS_HW_OPL3SA2:
 		ptexts = opl3sa_texts;
 		break;
@@ -2142,64 +2198,26 @@ EXPORT_SYMBOL(snd_wss_put_double);
 static const DECLARE_TLV_DB_SCALE(db_scale_6bit, -9450, 150, 0);
 static const DECLARE_TLV_DB_SCALE(db_scale_5bit_12db_max, -3450, 150, 0);
 static const DECLARE_TLV_DB_SCALE(db_scale_rec_gain, 0, 150, 0);
-
-static struct snd_kcontrol_new snd_ad1848_controls[] = {
-WSS_DOUBLE("PCM Playback Switch", 0, CS4231_LEFT_OUTPUT, CS4231_RIGHT_OUTPUT,
-	   7, 7, 1, 1),
-WSS_DOUBLE_TLV("PCM Playback Volume", 0,
-	       CS4231_LEFT_OUTPUT, CS4231_RIGHT_OUTPUT, 0, 0, 63, 1,
-	       db_scale_6bit),
-WSS_DOUBLE("Aux Playback Switch", 0,
-	   CS4231_AUX1_LEFT_INPUT, CS4231_AUX1_RIGHT_INPUT, 7, 7, 1, 1),
-WSS_DOUBLE_TLV("Aux Playback Volume", 0,
-	       CS4231_AUX1_LEFT_INPUT, CS4231_AUX1_RIGHT_INPUT, 0, 0, 31, 1,
-	       db_scale_5bit_12db_max),
-WSS_DOUBLE("Aux Playback Switch", 1,
-	   CS4231_AUX2_LEFT_INPUT, CS4231_AUX2_RIGHT_INPUT, 7, 7, 1, 1),
-WSS_DOUBLE_TLV("Aux Playback Volume", 1,
-	       CS4231_AUX2_LEFT_INPUT, CS4231_AUX2_RIGHT_INPUT, 0, 0, 31, 1,
-	       db_scale_5bit_12db_max),
-WSS_DOUBLE_TLV("Capture Volume", 0, CS4231_LEFT_INPUT, CS4231_RIGHT_INPUT,
-		0, 0, 15, 0, db_scale_rec_gain),
-{
-	.name = "Capture Source",
-	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-	.info = snd_wss_info_mux,
-	.get = snd_wss_get_mux,
-	.put = snd_wss_put_mux,
-},
-WSS_SINGLE("Loopback Capture Switch", 0, CS4231_LOOPBACK, 0, 1, 0),
-WSS_SINGLE_TLV("Loopback Capture Volume", 0, CS4231_LOOPBACK, 1, 63, 0,
-	       db_scale_6bit),
-};
+static const DECLARE_TLV_DB_SCALE(db_scale_4bit, -4500, 300, 0);
 
 static struct snd_kcontrol_new snd_wss_controls[] = {
 WSS_DOUBLE("PCM Playback Switch", 0,
 		CS4231_LEFT_OUTPUT, CS4231_RIGHT_OUTPUT, 7, 7, 1, 1),
-WSS_DOUBLE("PCM Playback Volume", 0,
-		CS4231_LEFT_OUTPUT, CS4231_RIGHT_OUTPUT, 0, 0, 63, 1),
-WSS_DOUBLE("Line Playback Switch", 0,
-		CS4231_LEFT_LINE_IN, CS4231_RIGHT_LINE_IN, 7, 7, 1, 1),
-WSS_DOUBLE("Line Playback Volume", 0,
-		CS4231_LEFT_LINE_IN, CS4231_RIGHT_LINE_IN, 0, 0, 31, 1),
+WSS_DOUBLE_TLV("PCM Playback Volume", 0,
+		CS4231_LEFT_OUTPUT, CS4231_RIGHT_OUTPUT, 0, 0, 63, 1,
+		db_scale_6bit),
 WSS_DOUBLE("Aux Playback Switch", 0,
 		CS4231_AUX1_LEFT_INPUT, CS4231_AUX1_RIGHT_INPUT, 7, 7, 1, 1),
-WSS_DOUBLE("Aux Playback Volume", 0,
-		CS4231_AUX1_LEFT_INPUT, CS4231_AUX1_RIGHT_INPUT, 0, 0, 31, 1),
+WSS_DOUBLE_TLV("Aux Playback Volume", 0,
+		CS4231_AUX1_LEFT_INPUT, CS4231_AUX1_RIGHT_INPUT, 0, 0, 31, 1,
+		db_scale_5bit_12db_max),
 WSS_DOUBLE("Aux Playback Switch", 1,
 		CS4231_AUX2_LEFT_INPUT, CS4231_AUX2_RIGHT_INPUT, 7, 7, 1, 1),
-WSS_DOUBLE("Aux Playback Volume", 1,
-		CS4231_AUX2_LEFT_INPUT, CS4231_AUX2_RIGHT_INPUT, 0, 0, 31, 1),
-WSS_SINGLE("Mono Playback Switch", 0,
-		CS4231_MONO_CTRL, 7, 1, 1),
-WSS_SINGLE("Mono Playback Volume", 0,
-		CS4231_MONO_CTRL, 0, 15, 1),
-WSS_SINGLE("Mono Output Playback Switch", 0,
-		CS4231_MONO_CTRL, 6, 1, 1),
-WSS_SINGLE("Mono Output Playback Bypass", 0,
-		CS4231_MONO_CTRL, 5, 1, 0),
-WSS_DOUBLE("Capture Volume", 0,
-		CS4231_LEFT_INPUT, CS4231_RIGHT_INPUT, 0, 0, 15, 0),
+WSS_DOUBLE_TLV("Aux Playback Volume", 1,
+		CS4231_AUX2_LEFT_INPUT, CS4231_AUX2_RIGHT_INPUT, 0, 0, 31, 1,
+		db_scale_5bit_12db_max),
+WSS_DOUBLE_TLV("Capture Volume", 0, CS4231_LEFT_INPUT, CS4231_RIGHT_INPUT,
+		0, 0, 15, 0, db_scale_rec_gain),
 {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "Capture Source",
@@ -2207,54 +2225,26 @@ WSS_DOUBLE("Capture Volume", 0,
 	.get = snd_wss_get_mux,
 	.put = snd_wss_put_mux,
 },
-WSS_DOUBLE("Mic Boost", 0,
+WSS_DOUBLE("Mic Boost (+20dB)", 0,
 		CS4231_LEFT_INPUT, CS4231_RIGHT_INPUT, 5, 5, 1, 0),
 WSS_SINGLE("Loopback Capture Switch", 0,
 		CS4231_LOOPBACK, 0, 1, 0),
-WSS_SINGLE("Loopback Capture Volume", 0,
-		CS4231_LOOPBACK, 2, 63, 1)
-};
-
-static struct snd_kcontrol_new snd_opti93x_controls[] = {
-WSS_DOUBLE("Master Playback Switch", 0,
-		OPTi93X_OUT_LEFT, OPTi93X_OUT_RIGHT, 7, 7, 1, 1),
-WSS_DOUBLE("Master Playback Volume", 0,
-		OPTi93X_OUT_LEFT, OPTi93X_OUT_RIGHT, 1, 1, 31, 1),
-WSS_DOUBLE("PCM Playback Switch", 0,
-		CS4231_LEFT_OUTPUT, CS4231_RIGHT_OUTPUT, 7, 7, 1, 1),
-WSS_DOUBLE("PCM Playback Volume", 0,
-		CS4231_LEFT_OUTPUT, CS4231_RIGHT_OUTPUT, 0, 0, 31, 1),
-WSS_DOUBLE("FM Playback Switch", 0,
-		CS4231_AUX2_LEFT_INPUT, CS4231_AUX2_RIGHT_INPUT, 7, 7, 1, 1),
-WSS_DOUBLE("FM Playback Volume", 0,
-		CS4231_AUX2_LEFT_INPUT, CS4231_AUX2_RIGHT_INPUT, 1, 1, 15, 1),
+WSS_SINGLE_TLV("Loopback Capture Volume", 0, CS4231_LOOPBACK, 2, 63, 1,
+		db_scale_6bit),
 WSS_DOUBLE("Line Playback Switch", 0,
 		CS4231_LEFT_LINE_IN, CS4231_RIGHT_LINE_IN, 7, 7, 1, 1),
-WSS_DOUBLE("Line Playback Volume", 0,
-		CS4231_LEFT_LINE_IN, CS4231_RIGHT_LINE_IN, 0, 0, 15, 1),
-WSS_DOUBLE("Mic Playback Switch", 0,
-		OPTi93X_MIC_LEFT_INPUT, OPTi93X_MIC_RIGHT_INPUT, 7, 7, 1, 1),
-WSS_DOUBLE("Mic Playback Volume", 0,
-		OPTi93X_MIC_LEFT_INPUT, OPTi93X_MIC_RIGHT_INPUT, 1, 1, 15, 1),
-WSS_DOUBLE("Mic Boost", 0,
-		CS4231_LEFT_INPUT, CS4231_RIGHT_INPUT, 5, 5, 1, 0),
-WSS_DOUBLE("CD Playback Switch", 0,
-		CS4231_AUX1_LEFT_INPUT, CS4231_AUX1_RIGHT_INPUT, 7, 7, 1, 1),
-WSS_DOUBLE("CD Playback Volume", 0,
-		CS4231_AUX1_LEFT_INPUT, CS4231_AUX1_RIGHT_INPUT, 1, 1, 15, 1),
-WSS_DOUBLE("Aux Playback Switch", 0,
-		OPTi931_AUX_LEFT_INPUT, OPTi931_AUX_RIGHT_INPUT, 7, 7, 1, 1),
-WSS_DOUBLE("Aux Playback Volume", 0,
-		OPTi931_AUX_LEFT_INPUT, OPTi931_AUX_RIGHT_INPUT, 1, 1, 15, 1),
-WSS_DOUBLE("Capture Volume", 0,
-		CS4231_LEFT_INPUT, CS4231_RIGHT_INPUT, 0, 0, 15, 0),
-{
-	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-	.name = "Capture Source",
-	.info = snd_wss_info_mux,
-	.get = snd_wss_get_mux,
-	.put = snd_wss_put_mux,
-}
+WSS_DOUBLE_TLV("Line Playback Volume", 0,
+		CS4231_LEFT_LINE_IN, CS4231_RIGHT_LINE_IN, 0, 0, 31, 1,
+		db_scale_5bit_12db_max),
+WSS_SINGLE("Beep Playback Switch", 0,
+		CS4231_MONO_CTRL, 7, 1, 1),
+WSS_SINGLE_TLV("Beep Playback Volume", 0,
+		CS4231_MONO_CTRL, 0, 15, 1,
+		db_scale_4bit),
+WSS_SINGLE("Mono Output Playback Switch", 0,
+		CS4231_MONO_CTRL, 6, 1, 1),
+WSS_SINGLE("Beep Bypass Playback Switch", 0,
+		CS4231_MONO_CTRL, 5, 1, 0),
 };
 
 int snd_wss_mixer(struct snd_wss *chip)
@@ -2262,6 +2252,7 @@ int snd_wss_mixer(struct snd_wss *chip)
 	struct snd_card *card;
 	unsigned int idx;
 	int err;
+	int count = ARRAY_SIZE(snd_wss_controls);
 
 	if (snd_BUG_ON(!chip || !chip->pcm))
 		return -EINVAL;
@@ -2270,30 +2261,20 @@ int snd_wss_mixer(struct snd_wss *chip)
 
 	strcpy(card->mixername, chip->pcm->name);
 
-	if (chip->hardware == WSS_HW_OPTI93X)
-		for (idx = 0; idx < ARRAY_SIZE(snd_opti93x_controls); idx++) {
-			err = snd_ctl_add(card,
-					snd_ctl_new1(&snd_opti93x_controls[idx],
-						     chip));
-			if (err < 0)
-				return err;
-		}
-	else if (chip->hardware & WSS_HW_AD1848_MASK)
-		for (idx = 0; idx < ARRAY_SIZE(snd_ad1848_controls); idx++) {
-			err = snd_ctl_add(card,
-					snd_ctl_new1(&snd_ad1848_controls[idx],
-						     chip));
-			if (err < 0)
-				return err;
-		}
-	else
-		for (idx = 0; idx < ARRAY_SIZE(snd_wss_controls); idx++) {
-			err = snd_ctl_add(card,
-					snd_ctl_new1(&snd_wss_controls[idx],
-						     chip));
-			if (err < 0)
-				return err;
-		}
+	/* Use only the first 11 entries on AD1848 */
+	if (chip->hardware & WSS_HW_AD1848_MASK)
+		count = 11;
+	/* There is no loopback on OPTI93X */
+	else if (chip->hardware == WSS_HW_OPTI93X)
+		count = 9;
+
+	for (idx = 0; idx < count; idx++) {
+		err = snd_ctl_add(card,
+				snd_ctl_new1(&snd_wss_controls[idx],
+					     chip));
+		if (err < 0)
+			return err;
+	}
 	return 0;
 }
 EXPORT_SYMBOL(snd_wss_mixer);

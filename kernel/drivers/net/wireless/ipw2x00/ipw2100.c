@@ -19,7 +19,7 @@
   file called LICENSE.
 
   Contact Information:
-  James P. Ketrenos <ipw2100-admin@linux.intel.com>
+  Intel Linux Wireless <ilw@linux.intel.com>
   Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
 
   Portions of this file are based on the sample_* files provided by Wireless
@@ -63,7 +63,7 @@ When data is sent to the firmware, the first TBD is used to indicate to the
 firmware if a Command or Data is being sent.  If it is Command, all of the
 command information is contained within the physical address referred to by the
 TBD.  If it is Data, the first TBD indicates the type of data packet, number
-of fragments, etc.  The next TBD then referrs to the actual packet location.
+of fragments, etc.  The next TBD then refers to the actual packet location.
 
 The Tx flow cycle is as follows:
 
@@ -174,6 +174,8 @@ that only one external action is invoked at a time.
 #define DRV_DESCRIPTION	"Intel(R) PRO/Wireless 2100 Network Driver"
 #define DRV_COPYRIGHT	"Copyright(c) 2003-2006 Intel Corporation"
 
+static struct pm_qos_request_list ipw2100_pm_qos_req;
+
 /* Debugging stuff */
 #ifdef CONFIG_IPW2100_DEBUG
 #define IPW2100_RX_DEBUG	/* Reception debugging */
@@ -185,7 +187,7 @@ MODULE_AUTHOR(DRV_COPYRIGHT);
 MODULE_LICENSE("GPL");
 
 static int debug = 0;
-static int mode = 0;
+static int network_mode = 0;
 static int channel = 0;
 static int associate = 0;
 static int disable = 0;
@@ -195,7 +197,7 @@ static struct ipw2100_fw ipw2100_firmware;
 
 #include <linux/moduleparam.h>
 module_param(debug, int, 0444);
-module_param(mode, int, 0444);
+module_param_named(mode, network_mode, int, 0444);
 module_param(channel, int, 0444);
 module_param(associate, int, 0444);
 module_param(disable, int, 0444);
@@ -285,7 +287,7 @@ static const char *command_types[] = {
 	"unused",		/* HOST_INTERRUPT_COALESCING */
 	"undefined",
 	"CARD_DISABLE_PHY_OFF",
-	"MSDU_TX_RATES" "undefined",
+	"MSDU_TX_RATES",
 	"undefined",
 	"SET_STATION_STAT_BITS",
 	"CLEAR_STATIONS_STAT_BITS",
@@ -295,6 +297,33 @@ static const char *command_types[] = {
 	"SET_WPA_ASS_IE"
 };
 #endif
+
+#define WEXT_USECHANNELS 1
+
+static const long ipw2100_frequencies[] = {
+	2412, 2417, 2422, 2427,
+	2432, 2437, 2442, 2447,
+	2452, 2457, 2462, 2467,
+	2472, 2484
+};
+
+#define FREQ_COUNT	ARRAY_SIZE(ipw2100_frequencies)
+
+static const long ipw2100_rates_11b[] = {
+	1000000,
+	2000000,
+	5500000,
+	11000000
+};
+
+static struct ieee80211_rate ipw2100_bg_rates[] = {
+	{ .bitrate = 10 },
+	{ .bitrate = 20, .flags = IEEE80211_RATE_SHORT_PREAMBLE },
+	{ .bitrate = 55, .flags = IEEE80211_RATE_SHORT_PREAMBLE },
+	{ .bitrate = 110, .flags = IEEE80211_RATE_SHORT_PREAMBLE },
+};
+
+#define RATE_COUNT ARRAY_SIZE(ipw2100_rates_11b)
 
 /* Pre-decl until we get the code solid and then we can clean it up */
 static void ipw2100_tx_send_commands(struct ipw2100_priv *priv);
@@ -551,7 +580,7 @@ static int ipw2100_get_ordinal(struct ipw2100_priv *priv, u32 ord,
 		/* get number of entries */
 		field_count = *(((u16 *) & field_info) + 1);
 
-		/* abort if no enought memory */
+		/* abort if no enough memory */
 		total_length = field_len * field_count;
 		if (total_length > *len) {
 			*len = total_length;
@@ -677,11 +706,10 @@ static void schedule_reset(struct ipw2100_priv *priv)
 		netif_stop_queue(priv->net_dev);
 		priv->status |= STATUS_RESET_PENDING;
 		if (priv->reset_backoff)
-			queue_delayed_work(priv->workqueue, &priv->reset_work,
-					   priv->reset_backoff * HZ);
+			schedule_delayed_work(&priv->reset_work,
+					      priv->reset_backoff * HZ);
 		else
-			queue_delayed_work(priv->workqueue, &priv->reset_work,
-					   0);
+			schedule_delayed_work(&priv->reset_work, 0);
 
 		if (priv->reset_backoff < MAX_RESET_BACKOFF)
 			priv->reset_backoff++;
@@ -1141,6 +1169,7 @@ static int rf_kill_active(struct ipw2100_priv *priv)
 	int i;
 
 	if (!(priv->hw_features & HW_FEATURE_RFKILL)) {
+		wiphy_rfkill_set_hw_state(priv->ieee->wdev.wiphy, false);
 		priv->status &= ~STATUS_RF_KILL_HW;
 		return 0;
 	}
@@ -1151,10 +1180,13 @@ static int rf_kill_active(struct ipw2100_priv *priv)
 		value = (value << 1) | ((reg & IPW_BIT_GPIO_RF_KILL) ? 0 : 1);
 	}
 
-	if (value == 0)
+	if (value == 0) {
+		wiphy_rfkill_set_hw_state(priv->ieee->wdev.wiphy, true);
 		priv->status |= STATUS_RF_KILL_HW;
-	else
+	} else {
+		wiphy_rfkill_set_hw_state(priv->ieee->wdev.wiphy, false);
 		priv->status &= ~STATUS_RF_KILL_HW;
+	}
 
 	return (value == 0);
 }
@@ -1364,7 +1396,7 @@ static int ipw2100_power_cycle_adapter(struct ipw2100_priv *priv)
 }
 
 /*
- * Send the CARD_DISABLE_PHY_OFF comamnd to the card to disable it
+ * Send the CARD_DISABLE_PHY_OFF command to the card to disable it
  *
  * After disabling, if the card was associated, a STATUS_ASSN_LOST will be sent.
  *
@@ -1441,7 +1473,7 @@ static int ipw2100_enable_adapter(struct ipw2100_priv *priv)
 
 	if (priv->stop_hang_check) {
 		priv->stop_hang_check = 0;
-		queue_delayed_work(priv->workqueue, &priv->hang_check, HZ / 2);
+		schedule_delayed_work(&priv->hang_check, HZ / 2);
 	}
 
       fail_up:
@@ -1673,7 +1705,7 @@ static int ipw2100_start_scan(struct ipw2100_priv *priv)
 	return err;
 }
 
-static const struct ieee80211_geo ipw_geos[] = {
+static const struct libipw_geo ipw_geos[] = {
 	{			/* Restricted */
 	 "---",
 	 .bg_channels = 14,
@@ -1694,7 +1726,7 @@ static int ipw2100_up(struct ipw2100_priv *priv, int deferred)
 
 	/* Age scan list entries found before suspend */
 	if (priv->suspend_time) {
-		ieee80211_networks_age(priv->ieee, priv->suspend_time);
+		libipw_networks_age(priv->ieee, priv->suspend_time);
 		priv->suspend_time = 0;
 	}
 
@@ -1708,7 +1740,7 @@ static int ipw2100_up(struct ipw2100_priv *priv, int deferred)
 	/* the ipw2100 hardware really doesn't want power management delays
 	 * longer than 175usec
 	 */
-	pm_qos_update_requirement(PM_QOS_CPU_DMA_LATENCY, "ipw2100", 175);
+	pm_qos_update_request(&ipw2100_pm_qos_req, 175);
 
 	/* If the interrupt is enabled, turn it off... */
 	spin_lock_irqsave(&priv->low_lock, flags);
@@ -1752,11 +1784,11 @@ static int ipw2100_up(struct ipw2100_priv *priv, int deferred)
 	}
 
 	/* Initialize the geo */
-	if (ieee80211_set_geo(priv->ieee, &ipw_geos[0])) {
+	if (libipw_set_geo(priv->ieee, &ipw_geos[0])) {
 		printk(KERN_WARNING DRV_NAME "Could not set geo\n");
 		return 0;
 	}
-	priv->ieee->freq_band = IEEE80211_24GHZ_BAND;
+	priv->ieee->freq_band = LIBIPW_24GHZ_BAND;
 
 	lock = LOCK_NONE;
 	if (ipw2100_set_ordinal(priv, IPW_ORD_PERS_DB_LOCK, &lock, &ord_len)) {
@@ -1775,8 +1807,8 @@ static int ipw2100_up(struct ipw2100_priv *priv, int deferred)
 
 		if (priv->stop_rf_kill) {
 			priv->stop_rf_kill = 0;
-			queue_delayed_work(priv->workqueue, &priv->rf_kill,
-					   round_jiffies_relative(HZ));
+			schedule_delayed_work(&priv->rf_kill,
+					      round_jiffies_relative(HZ));
 		}
 
 		deferred = 1;
@@ -1812,13 +1844,6 @@ static int ipw2100_up(struct ipw2100_priv *priv, int deferred)
 
       exit:
 	return rc;
-}
-
-/* Called by register_netdev() */
-static int ipw2100_net_init(struct net_device *dev)
-{
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
-	return ipw2100_up(priv, 1);
 }
 
 static void ipw2100_down(struct ipw2100_priv *priv)
@@ -1863,8 +1888,7 @@ static void ipw2100_down(struct ipw2100_priv *priv)
 	ipw2100_disable_interrupts(priv);
 	spin_unlock_irqrestore(&priv->low_lock, flags);
 
-	pm_qos_update_requirement(PM_QOS_CPU_DMA_LATENCY, "ipw2100",
-			PM_QOS_DEFAULT_VALUE);
+	pm_qos_update_request(&ipw2100_pm_qos_req, PM_QOS_DEFAULT_VALUE);
 
 	/* We have to signal any supplicant if we are disassociating */
 	if (associated)
@@ -1873,6 +1897,70 @@ static void ipw2100_down(struct ipw2100_priv *priv)
 	priv->status &= ~(STATUS_ASSOCIATED | STATUS_ASSOCIATING);
 	netif_carrier_off(priv->net_dev);
 	netif_stop_queue(priv->net_dev);
+}
+
+/* Called by register_netdev() */
+static int ipw2100_net_init(struct net_device *dev)
+{
+	struct ipw2100_priv *priv = libipw_priv(dev);
+
+	return ipw2100_up(priv, 1);
+}
+
+static int ipw2100_wdev_init(struct net_device *dev)
+{
+	struct ipw2100_priv *priv = libipw_priv(dev);
+	const struct libipw_geo *geo = libipw_get_geo(priv->ieee);
+	struct wireless_dev *wdev = &priv->ieee->wdev;
+	int i;
+
+	memcpy(wdev->wiphy->perm_addr, priv->mac_addr, ETH_ALEN);
+
+	/* fill-out priv->ieee->bg_band */
+	if (geo->bg_channels) {
+		struct ieee80211_supported_band *bg_band = &priv->ieee->bg_band;
+
+		bg_band->band = IEEE80211_BAND_2GHZ;
+		bg_band->n_channels = geo->bg_channels;
+		bg_band->channels = kcalloc(geo->bg_channels,
+					    sizeof(struct ieee80211_channel),
+					    GFP_KERNEL);
+		if (!bg_band->channels) {
+			ipw2100_down(priv);
+			return -ENOMEM;
+		}
+		/* translate geo->bg to bg_band.channels */
+		for (i = 0; i < geo->bg_channels; i++) {
+			bg_band->channels[i].band = IEEE80211_BAND_2GHZ;
+			bg_band->channels[i].center_freq = geo->bg[i].freq;
+			bg_band->channels[i].hw_value = geo->bg[i].channel;
+			bg_band->channels[i].max_power = geo->bg[i].max_power;
+			if (geo->bg[i].flags & LIBIPW_CH_PASSIVE_ONLY)
+				bg_band->channels[i].flags |=
+					IEEE80211_CHAN_PASSIVE_SCAN;
+			if (geo->bg[i].flags & LIBIPW_CH_NO_IBSS)
+				bg_band->channels[i].flags |=
+					IEEE80211_CHAN_NO_IBSS;
+			if (geo->bg[i].flags & LIBIPW_CH_RADAR_DETECT)
+				bg_band->channels[i].flags |=
+					IEEE80211_CHAN_RADAR;
+			/* No equivalent for LIBIPW_CH_80211H_RULES,
+			   LIBIPW_CH_UNIFORM_SPREADING, or
+			   LIBIPW_CH_B_ONLY... */
+		}
+		/* point at bitrate info */
+		bg_band->bitrates = ipw2100_bg_rates;
+		bg_band->n_bitrates = RATE_COUNT;
+
+		wdev->wiphy->bands[IEEE80211_BAND_2GHZ] = bg_band;
+	}
+
+	set_wiphy_dev(wdev->wiphy, &priv->pci_dev->dev);
+	if (wiphy_register(wdev->wiphy)) {
+		ipw2100_down(priv);
+		return -EIO;
+	}
+	return 0;
 }
 
 static void ipw2100_reset_adapter(struct work_struct *work)
@@ -1999,7 +2087,7 @@ static void isr_indicate_associated(struct ipw2100_priv *priv, u32 status)
 	priv->status |= STATUS_ASSOCIATING;
 	priv->connect_start = get_seconds();
 
-	queue_delayed_work(priv->workqueue, &priv->wx_event_work, HZ / 10);
+	schedule_delayed_work(&priv->wx_event_work, HZ / 10);
 }
 
 static int ipw2100_set_essid(struct ipw2100_priv *priv, char *essid,
@@ -2058,7 +2146,7 @@ static void isr_indicate_association_lost(struct ipw2100_priv *priv, u32 status)
 	DECLARE_SSID_BUF(ssid);
 
 	IPW_DEBUG(IPW_DL_NOTIF | IPW_DL_STATE | IPW_DL_ASSOC,
-		  "disassociated: '%s' %pM \n",
+		  "disassociated: '%s' %pM\n",
 		  print_ssid(ssid, priv->essid, priv->essid_len),
 		  priv->bssid);
 
@@ -2079,9 +2167,9 @@ static void isr_indicate_association_lost(struct ipw2100_priv *priv, u32 status)
 		return;
 
 	if (priv->status & STATUS_SECURITY_UPDATED)
-		queue_delayed_work(priv->workqueue, &priv->security_work, 0);
+		schedule_delayed_work(&priv->security_work, 0);
 
-	queue_delayed_work(priv->workqueue, &priv->wx_event_work, 0);
+	schedule_delayed_work(&priv->wx_event_work, 0);
 }
 
 static void isr_indicate_rf_kill(struct ipw2100_priv *priv, u32 status)
@@ -2090,13 +2178,13 @@ static void isr_indicate_rf_kill(struct ipw2100_priv *priv, u32 status)
 		       priv->net_dev->name);
 
 	/* RF_KILL is now enabled (else we wouldn't be here) */
+	wiphy_rfkill_set_hw_state(priv->ieee->wdev.wiphy, true);
 	priv->status |= STATUS_RF_KILL_HW;
 
 	/* Make sure the RF Kill check timer is running */
 	priv->stop_rf_kill = 0;
 	cancel_delayed_work(&priv->rf_kill);
-	queue_delayed_work(priv->workqueue, &priv->rf_kill,
-			   round_jiffies_relative(HZ));
+	schedule_delayed_work(&priv->rf_kill, round_jiffies_relative(HZ));
 }
 
 static void send_scan_event(void *data)
@@ -2131,13 +2219,12 @@ static void isr_scan_complete(struct ipw2100_priv *priv, u32 status)
 	/* Only userspace-requested scan completion events go out immediately */
 	if (!priv->user_requested_scan) {
 		if (!delayed_work_pending(&priv->scan_event_later))
-			queue_delayed_work(priv->workqueue,
-					&priv->scan_event_later,
-					round_jiffies_relative(msecs_to_jiffies(4000)));
+			schedule_delayed_work(&priv->scan_event_later,
+					      round_jiffies_relative(msecs_to_jiffies(4000)));
 	} else {
 		priv->user_requested_scan = 0;
 		cancel_delayed_work(&priv->scan_event_later);
-		queue_work(priv->workqueue, &priv->scan_event_now);
+		schedule_work(&priv->scan_event_now);
 	}
 }
 
@@ -2340,8 +2427,8 @@ static u32 ipw2100_match_buf(struct ipw2100_priv *priv, u8 * in_buf,
  *
  * When packet is provided by the firmware, it contains the following:
  *
- * .  ieee80211_hdr
- * .  ieee80211_snap_hdr
+ * .  libipw_hdr
+ * .  libipw_snap_hdr
  *
  * The size of the constructed ethernet
  *
@@ -2396,7 +2483,7 @@ static void ipw2100_corruption_detected(struct ipw2100_priv *priv, int i)
 }
 
 static void isr_rx(struct ipw2100_priv *priv, int i,
-			  struct ieee80211_rx_stats *stats)
+			  struct libipw_rx_stats *stats)
 {
 	struct net_device *dev = priv->net_dev;
 	struct ipw2100_status *status = &priv->status_queue.drv[i];
@@ -2435,13 +2522,13 @@ static void isr_rx(struct ipw2100_priv *priv, int i,
 
 #ifdef IPW2100_RX_DEBUG
 	/* Make a copy of the frame so we can dump it to the logs if
-	 * ieee80211_rx fails */
+	 * libipw_rx fails */
 	skb_copy_from_linear_data(packet->skb, packet_data,
 				  min_t(u32, status->frame_size,
 					     IPW_RX_NIC_BUFFER_LENGTH));
 #endif
 
-	if (!ieee80211_rx(priv->ieee, packet->skb, stats)) {
+	if (!libipw_rx(priv->ieee, packet->skb, stats)) {
 #ifdef IPW2100_RX_DEBUG
 		IPW_DEBUG_DROP("%s: Non consumed packet:\n",
 			       dev->name);
@@ -2449,7 +2536,7 @@ static void isr_rx(struct ipw2100_priv *priv, int i,
 #endif
 		dev->stats.rx_errors++;
 
-		/* ieee80211_rx failed, so it didn't free the SKB */
+		/* libipw_rx failed, so it didn't free the SKB */
 		dev_kfree_skb_any(packet->skb);
 		packet->skb = NULL;
 	}
@@ -2470,7 +2557,7 @@ static void isr_rx(struct ipw2100_priv *priv, int i,
 #ifdef CONFIG_IPW2100_MONITOR
 
 static void isr_rx_monitor(struct ipw2100_priv *priv, int i,
-		   struct ieee80211_rx_stats *stats)
+		   struct libipw_rx_stats *stats)
 {
 	struct net_device *dev = priv->net_dev;
 	struct ipw2100_status *status = &priv->status_queue.drv[i];
@@ -2528,10 +2615,10 @@ static void isr_rx_monitor(struct ipw2100_priv *priv, int i,
 
 	skb_put(packet->skb, status->frame_size + sizeof(struct ipw_rt_hdr));
 
-	if (!ieee80211_rx(priv->ieee, packet->skb, stats)) {
+	if (!libipw_rx(priv->ieee, packet->skb, stats)) {
 		dev->stats.rx_errors++;
 
-		/* ieee80211_rx failed, so it didn't free the SKB */
+		/* libipw_rx failed, so it didn't free the SKB */
 		dev_kfree_skb_any(packet->skb);
 		packet->skb = NULL;
 	}
@@ -2615,7 +2702,7 @@ static void __ipw2100_rx_process(struct ipw2100_priv *priv)
 	u16 frame_type;
 	u32 r, w, i, s;
 	struct ipw2100_rx *u;
-	struct ieee80211_rx_stats stats = {
+	struct libipw_rx_stats stats = {
 		.mac_time = jiffies,
 	};
 
@@ -2635,14 +2722,6 @@ static void __ipw2100_rx_process(struct ipw2100_priv *priv)
 
 		packet = &priv->rx_buffers[i];
 
-		/* Sync the DMA for the STATUS buffer so CPU is sure to get
-		 * the correct values */
-		pci_dma_sync_single_for_cpu(priv->pci_dev,
-					    sq->nic +
-					    sizeof(struct ipw2100_status) * i,
-					    sizeof(struct ipw2100_status),
-					    PCI_DMA_FROMDEVICE);
-
 		/* Sync the DMA for the RX buffer so CPU is sure to get
 		 * the correct values */
 		pci_dma_sync_single_for_cpu(priv->pci_dev, packet->dma_addr,
@@ -2661,8 +2740,8 @@ static void __ipw2100_rx_process(struct ipw2100_priv *priv)
 
 		stats.mask = 0;
 		if (stats.rssi != 0)
-			stats.mask |= IEEE80211_STATMASK_RSSI;
-		stats.freq = IEEE80211_24GHZ_BAND;
+			stats.mask |= LIBIPW_STATMASK_RSSI;
+		stats.freq = LIBIPW_24GHZ_BAND;
 
 		IPW_DEBUG_RX("%s: '%s' frame type received (%d).\n",
 			     priv->net_dev->name, frame_types[frame_type],
@@ -2686,11 +2765,11 @@ static void __ipw2100_rx_process(struct ipw2100_priv *priv)
 				break;
 			}
 #endif
-			if (stats.len < sizeof(struct ieee80211_hdr_3addr))
+			if (stats.len < sizeof(struct libipw_hdr_3addr))
 				break;
 			switch (WLAN_FC_GET_TYPE(le16_to_cpu(u->rx_data.header.frame_ctl))) {
 			case IEEE80211_FTYPE_MGMT:
-				ieee80211_rx_mgt(priv->ieee,
+				libipw_rx_mgt(priv->ieee,
 						 &u->rx_data.header, &stats);
 				break;
 
@@ -2844,7 +2923,7 @@ static int __ipw2100_tx_process(struct ipw2100_priv *priv)
 
 #ifdef CONFIG_IPW2100_DEBUG
 	{
-		int i = txq->oldest;
+		i = txq->oldest;
 		IPW_DEBUG_TX("TX%d V=%p P=%04X T=%04X L=%d\n", i,
 			     &txq->drv[i],
 			     (u32) (txq->nic + i * sizeof(struct ipw2100_bd)),
@@ -2884,7 +2963,7 @@ static int __ipw2100_tx_process(struct ipw2100_priv *priv)
 					 tbd->buf_length, PCI_DMA_TODEVICE);
 		}
 
-		ieee80211_txb_free(packet->info.d_struct.txb);
+		libipw_txb_free(packet->info.d_struct.txb);
 		packet->info.d_struct.txb = NULL;
 
 		list_add_tail(element, &priv->tx_free_list);
@@ -2976,9 +3055,9 @@ static void ipw2100_tx_send_commands(struct ipw2100_priv *priv)
 
 		packet = list_entry(element, struct ipw2100_tx_packet, list);
 
-		IPW_DEBUG_TX("using TBD at virt=%p, phys=%p\n",
+		IPW_DEBUG_TX("using TBD at virt=%p, phys=%04X\n",
 			     &txq->drv[txq->next],
-			     (void *)(txq->nic + txq->next *
+			     (u32) (txq->nic + txq->next *
 				      sizeof(struct ipw2100_bd)));
 
 		packet->index = txq->next;
@@ -3028,7 +3107,7 @@ static void ipw2100_tx_send_data(struct ipw2100_priv *priv)
 	int next = txq->next;
 	int i = 0;
 	struct ipw2100_data_header *ipw_hdr;
-	struct ieee80211_hdr_3addr *hdr;
+	struct libipw_hdr_3addr *hdr;
 
 	while (!list_empty(&priv->tx_pend_list)) {
 		/* if there isn't enough space in TBD queue, then
@@ -3044,7 +3123,7 @@ static void ipw2100_tx_send_data(struct ipw2100_priv *priv)
 			     IPW_MAX_BDS)) {
 			/* TODO: Support merging buffers if more than
 			 * IPW_MAX_BDS are used */
-			IPW_DEBUG_INFO("%s: Maximum BD theshold exceeded.  "
+			IPW_DEBUG_INFO("%s: Maximum BD threshold exceeded.  "
 				       "Increase fragmentation level.\n",
 				       priv->net_dev->name);
 		}
@@ -3062,7 +3141,7 @@ static void ipw2100_tx_send_data(struct ipw2100_priv *priv)
 		packet->index = txq->next;
 
 		ipw_hdr = packet->info.d_struct.data;
-		hdr = (struct ieee80211_hdr_3addr *)packet->info.d_struct.txb->
+		hdr = (struct libipw_hdr_3addr *)packet->info.d_struct.txb->
 		    fragments[0]->data;
 
 		if (priv->ieee->iw_mode == IW_MODE_INFRA) {
@@ -3086,7 +3165,7 @@ static void ipw2100_tx_send_data(struct ipw2100_priv *priv)
 		if (packet->info.d_struct.txb->nr_frags > 1)
 			ipw_hdr->fragment_size =
 			    packet->info.d_struct.txb->frag_size -
-			    IEEE80211_3ADDR_LEN;
+			    LIBIPW_3ADDR_LEN;
 		else
 			ipw_hdr->fragment_size = 0;
 
@@ -3119,13 +3198,13 @@ static void ipw2100_tx_send_data(struct ipw2100_priv *priv)
 				    IPW_BD_STATUS_TX_FRAME_NOT_LAST_FRAGMENT;
 
 			tbd->buf_length = packet->info.d_struct.txb->
-			    fragments[i]->len - IEEE80211_3ADDR_LEN;
+			    fragments[i]->len - LIBIPW_3ADDR_LEN;
 
 			tbd->host_addr = pci_map_single(priv->pci_dev,
 							packet->info.d_struct.
 							txb->fragments[i]->
 							data +
-							IEEE80211_3ADDR_LEN,
+							LIBIPW_3ADDR_LEN,
 							tbd->buf_length,
 							PCI_DMA_TODEVICE);
 
@@ -3156,7 +3235,6 @@ static void ipw2100_tx_send_data(struct ipw2100_priv *priv)
 			       IPW_MEM_HOST_SHARED_TX_QUEUE_WRITE_INDEX,
 			       txq->next);
 	}
-	return;
 }
 
 static void ipw2100_irq_tasklet(struct ipw2100_priv *priv)
@@ -3202,7 +3280,7 @@ static void ipw2100_irq_tasklet(struct ipw2100_priv *priv)
 
 	if (inta & IPW2100_INTA_PARITY_ERROR) {
 		printk(KERN_ERR DRV_NAME
-		       ": ***** PARITY ERROR INTERRUPT !!!! \n");
+		       ": ***** PARITY ERROR INTERRUPT !!!!\n");
 		priv->inta_other++;
 		write_register(dev, IPW_REG_INTA, IPW2100_INTA_PARITY_ERROR);
 	}
@@ -3330,10 +3408,10 @@ static irqreturn_t ipw2100_interrupt(int irq, void *data)
 	return IRQ_NONE;
 }
 
-static int ipw2100_tx(struct ieee80211_txb *txb, struct net_device *dev,
-		      int pri)
+static netdev_tx_t ipw2100_tx(struct libipw_txb *txb,
+			      struct net_device *dev, int pri)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	struct list_head *element;
 	struct ipw2100_tx_packet *packet;
 	unsigned long flags;
@@ -3369,12 +3447,12 @@ static int ipw2100_tx(struct ieee80211_txb *txb, struct net_device *dev,
 	ipw2100_tx_send_data(priv);
 
 	spin_unlock_irqrestore(&priv->low_lock, flags);
-	return 0;
+	return NETDEV_TX_OK;
 
-      fail_unlock:
+fail_unlock:
 	netif_stop_queue(dev);
 	spin_unlock_irqrestore(&priv->low_lock, flags);
-	return 1;
+	return NETDEV_TX_BUSY;
 }
 
 static int ipw2100_msg_allocate(struct ipw2100_priv *priv)
@@ -3384,10 +3462,8 @@ static int ipw2100_msg_allocate(struct ipw2100_priv *priv)
 	dma_addr_t p;
 
 	priv->msg_buffers =
-	    (struct ipw2100_tx_packet *)kmalloc(IPW_COMMAND_POOL_SIZE *
-						sizeof(struct
-						       ipw2100_tx_packet),
-						GFP_KERNEL);
+	    kmalloc(IPW_COMMAND_POOL_SIZE * sizeof(struct ipw2100_tx_packet),
+		    GFP_KERNEL);
 	if (!priv->msg_buffers) {
 		printk(KERN_ERR DRV_NAME ": %s: PCI alloc failed for msg "
 		       "buffers.\n", priv->net_dev->name);
@@ -3488,7 +3564,7 @@ static DEVICE_ATTR(pci, S_IRUGO, show_pci, NULL);
 static ssize_t show_cfg(struct device *d, struct device_attribute *attr,
 			char *buf)
 {
-	struct ipw2100_priv *p = d->driver_data;
+	struct ipw2100_priv *p = dev_get_drvdata(d);
 	return sprintf(buf, "0x%08x\n", (int)p->config);
 }
 
@@ -3497,7 +3573,7 @@ static DEVICE_ATTR(cfg, S_IRUGO, show_cfg, NULL);
 static ssize_t show_status(struct device *d, struct device_attribute *attr,
 			   char *buf)
 {
-	struct ipw2100_priv *p = d->driver_data;
+	struct ipw2100_priv *p = dev_get_drvdata(d);
 	return sprintf(buf, "0x%08x\n", (int)p->status);
 }
 
@@ -3506,7 +3582,7 @@ static DEVICE_ATTR(status, S_IRUGO, show_status, NULL);
 static ssize_t show_capability(struct device *d, struct device_attribute *attr,
 			       char *buf)
 {
-	struct ipw2100_priv *p = d->driver_data;
+	struct ipw2100_priv *p = dev_get_drvdata(d);
 	return sprintf(buf, "0x%08x\n", (int)p->capability);
 }
 
@@ -4224,7 +4300,7 @@ static ssize_t show_rf_kill(struct device *d, struct device_attribute *attr,
 	   1 - SW based RF kill active (sysfs)
 	   2 - HW based RF kill active
 	   3 - Both HW and SW baed RF kill active */
-	struct ipw2100_priv *priv = (struct ipw2100_priv *)d->driver_data;
+	struct ipw2100_priv *priv = dev_get_drvdata(d);
 	int val = ((priv->status & STATUS_RF_KILL_SW) ? 0x1 : 0x0) |
 	    (rf_kill_active(priv) ? 0x2 : 0x0);
 	return sprintf(buf, "%i\n", val);
@@ -4252,8 +4328,8 @@ static int ipw_radio_kill_sw(struct ipw2100_priv *priv, int disable_radio)
 			/* Make sure the RF_KILL check timer is running */
 			priv->stop_rf_kill = 0;
 			cancel_delayed_work(&priv->rf_kill);
-			queue_delayed_work(priv->workqueue, &priv->rf_kill,
-					   round_jiffies_relative(HZ));
+			schedule_delayed_work(&priv->rf_kill,
+					      round_jiffies_relative(HZ));
 		} else
 			schedule_reset(priv);
 	}
@@ -4384,20 +4460,17 @@ static void bd_queue_initialize(struct ipw2100_priv *priv,
 	IPW_DEBUG_INFO("exit\n");
 }
 
-static void ipw2100_kill_workqueue(struct ipw2100_priv *priv)
+static void ipw2100_kill_works(struct ipw2100_priv *priv)
 {
-	if (priv->workqueue) {
-		priv->stop_rf_kill = 1;
-		priv->stop_hang_check = 1;
-		cancel_delayed_work(&priv->reset_work);
-		cancel_delayed_work(&priv->security_work);
-		cancel_delayed_work(&priv->wx_event_work);
-		cancel_delayed_work(&priv->hang_check);
-		cancel_delayed_work(&priv->rf_kill);
-		cancel_delayed_work(&priv->scan_event_later);
-		destroy_workqueue(priv->workqueue);
-		priv->workqueue = NULL;
-	}
+	priv->stop_rf_kill = 1;
+	priv->stop_hang_check = 1;
+	cancel_delayed_work_sync(&priv->reset_work);
+	cancel_delayed_work_sync(&priv->security_work);
+	cancel_delayed_work_sync(&priv->wx_event_work);
+	cancel_delayed_work_sync(&priv->hang_check);
+	cancel_delayed_work_sync(&priv->rf_kill);
+	cancel_work_sync(&priv->scan_event_now);
+	cancel_delayed_work_sync(&priv->scan_event_later);
 }
 
 static int ipw2100_tx_allocate(struct ipw2100_priv *priv)
@@ -4416,10 +4489,8 @@ static int ipw2100_tx_allocate(struct ipw2100_priv *priv)
 	}
 
 	priv->tx_buffers =
-	    (struct ipw2100_tx_packet *)kmalloc(TX_PENDED_QUEUE_LENGTH *
-						sizeof(struct
-						       ipw2100_tx_packet),
-						GFP_ATOMIC);
+	    kmalloc(TX_PENDED_QUEUE_LENGTH * sizeof(struct ipw2100_tx_packet),
+		    GFP_ATOMIC);
 	if (!priv->tx_buffers) {
 		printk(KERN_ERR DRV_NAME
 		       ": %s: alloc failed form tx buffers.\n",
@@ -4488,7 +4559,7 @@ static void ipw2100_tx_initialize(struct ipw2100_priv *priv)
 		/* We simply drop any SKBs that have been queued for
 		 * transmit */
 		if (priv->tx_buffers[i].info.d_struct.txb) {
-			ieee80211_txb_free(priv->tx_buffers[i].info.d_struct.
+			libipw_txb_free(priv->tx_buffers[i].info.d_struct.
 					   txb);
 			priv->tx_buffers[i].info.d_struct.txb = NULL;
 		}
@@ -4527,7 +4598,7 @@ static void ipw2100_tx_free(struct ipw2100_priv *priv)
 
 	for (i = 0; i < TX_PENDED_QUEUE_LENGTH; i++) {
 		if (priv->tx_buffers[i].info.d_struct.txb) {
-			ieee80211_txb_free(priv->tx_buffers[i].info.d_struct.
+			libipw_txb_free(priv->tx_buffers[i].info.d_struct.
 					   txb);
 			priv->tx_buffers[i].info.d_struct.txb = NULL;
 		}
@@ -4568,9 +4639,9 @@ static int ipw2100_rx_allocate(struct ipw2100_priv *priv)
 	/*
 	 * allocate packets
 	 */
-	priv->rx_buffers = (struct ipw2100_rx_packet *)
-	    kmalloc(RX_QUEUE_LENGTH * sizeof(struct ipw2100_rx_packet),
-		    GFP_KERNEL);
+	priv->rx_buffers = kmalloc(RX_QUEUE_LENGTH *
+				   sizeof(struct ipw2100_rx_packet),
+				   GFP_KERNEL);
 	if (!priv->rx_buffers) {
 		IPW_DEBUG_INFO("can't allocate rx packet buffer table\n");
 
@@ -5150,7 +5221,7 @@ struct security_info_params {
 	u8 auth_mode;
 	u8 replay_counters_number;
 	u8 unicast_using_group;
-} __attribute__ ((packed));
+} __packed;
 
 static int ipw2100_set_security_information(struct ipw2100_priv *priv,
 					    int auth_mode,
@@ -5558,9 +5629,9 @@ static void ipw2100_security_work(struct work_struct *work)
 }
 
 static void shim__set_security(struct net_device *dev,
-			       struct ieee80211_security *sec)
+			       struct libipw_security *sec)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int i, force_update = 0;
 
 	mutex_lock(&priv->action_mutex);
@@ -5753,7 +5824,7 @@ static int ipw2100_adapter_setup(struct ipw2100_priv *priv)
  * method as well) to talk to the firmware */
 static int ipw2100_set_address(struct net_device *dev, void *p)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	struct sockaddr *addr = p;
 	int err = 0;
 
@@ -5781,7 +5852,7 @@ static int ipw2100_set_address(struct net_device *dev, void *p)
 
 static int ipw2100_open(struct net_device *dev)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	unsigned long flags;
 	IPW_DEBUG_INFO("dev->open\n");
 
@@ -5797,7 +5868,7 @@ static int ipw2100_open(struct net_device *dev)
 
 static int ipw2100_close(struct net_device *dev)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	unsigned long flags;
 	struct list_head *element;
 	struct ipw2100_tx_packet *packet;
@@ -5818,7 +5889,7 @@ static int ipw2100_close(struct net_device *dev)
 		list_del(element);
 		DEC_STAT(&priv->tx_pend_stat);
 
-		ieee80211_txb_free(packet->info.d_struct.txb);
+		libipw_txb_free(packet->info.d_struct.txb);
 		packet->info.d_struct.txb = NULL;
 
 		list_add_tail(element, &priv->tx_free_list);
@@ -5836,7 +5907,7 @@ static int ipw2100_close(struct net_device *dev)
  */
 static void ipw2100_tx_timeout(struct net_device *dev)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	dev->stats.tx_errors++;
 
@@ -5861,8 +5932,8 @@ static int ipw2100_wpa_enable(struct ipw2100_priv *priv, int value)
 static int ipw2100_wpa_set_auth_algs(struct ipw2100_priv *priv, int value)
 {
 
-	struct ieee80211_device *ieee = priv->ieee;
-	struct ieee80211_security sec = {
+	struct libipw_device *ieee = priv->ieee;
+	struct libipw_security sec = {
 		.flags = SEC_AUTH_MODE,
 	};
 	int ret = 0;
@@ -5907,7 +5978,7 @@ static void ipw2100_wpa_assoc_frame(struct ipw2100_priv *priv,
 static void ipw_ethtool_get_drvinfo(struct net_device *dev,
 				    struct ethtool_drvinfo *info)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	char fw_ver[64], ucode_ver[64];
 
 	strcpy(info->driver, DRV_NAME);
@@ -5924,7 +5995,7 @@ static void ipw_ethtool_get_drvinfo(struct net_device *dev,
 
 static u32 ipw2100_ethtool_get_link(struct net_device *dev)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	return (priv->status & STATUS_ASSOCIATED) ? 1 : 0;
 }
 
@@ -5971,7 +6042,7 @@ static void ipw2100_hang_check(struct work_struct *work)
 	priv->last_rtc = rtc;
 
 	if (!priv->stop_hang_check)
-		queue_delayed_work(priv->workqueue, &priv->hang_check, HZ / 2);
+		schedule_delayed_work(&priv->hang_check, HZ / 2);
 
 	spin_unlock_irqrestore(&priv->low_lock, flags);
 }
@@ -5987,8 +6058,8 @@ static void ipw2100_rf_kill(struct work_struct *work)
 	if (rf_kill_active(priv)) {
 		IPW_DEBUG_RF_KILL("RF Kill active, rescheduling GPIO check\n");
 		if (!priv->stop_rf_kill)
-			queue_delayed_work(priv->workqueue, &priv->rf_kill,
-					   round_jiffies_relative(HZ));
+			schedule_delayed_work(&priv->rf_kill,
+					      round_jiffies_relative(HZ));
 		goto exit_unlock;
 	}
 
@@ -6011,15 +6082,15 @@ static void ipw2100_irq_tasklet(struct ipw2100_priv *priv);
 static const struct net_device_ops ipw2100_netdev_ops = {
 	.ndo_open		= ipw2100_open,
 	.ndo_stop		= ipw2100_close,
-	.ndo_start_xmit		= ieee80211_xmit,
-	.ndo_change_mtu		= ieee80211_change_mtu,
+	.ndo_start_xmit		= libipw_xmit,
+	.ndo_change_mtu		= libipw_change_mtu,
 	.ndo_init		= ipw2100_net_init,
 	.ndo_tx_timeout		= ipw2100_tx_timeout,
 	.ndo_set_mac_address	= ipw2100_set_address,
 	.ndo_validate_addr	= eth_validate_addr,
 };
 
-/* Look into using netdev destructor to shutdown ieee80211? */
+/* Look into using netdev destructor to shutdown libipw? */
 
 static struct net_device *ipw2100_alloc_device(struct pci_dev *pci_dev,
 					       void __iomem * base_addr,
@@ -6029,10 +6100,10 @@ static struct net_device *ipw2100_alloc_device(struct pci_dev *pci_dev,
 	struct ipw2100_priv *priv;
 	struct net_device *dev;
 
-	dev = alloc_ieee80211(sizeof(struct ipw2100_priv));
+	dev = alloc_libipw(sizeof(struct ipw2100_priv), 0);
 	if (!dev)
 		return NULL;
-	priv = ieee80211_priv(dev);
+	priv = libipw_priv(dev);
 	priv->ieee = netdev_priv(dev);
 	priv->pci_dev = pci_dev;
 	priv->net_dev = dev;
@@ -6046,7 +6117,7 @@ static struct net_device *ipw2100_alloc_device(struct pci_dev *pci_dev,
 	dev->netdev_ops = &ipw2100_netdev_ops;
 	dev->ethtool_ops = &ipw2100_ethtool_ops;
 	dev->wireless_handlers = &ipw2100_wx_handler_def;
-	priv->wireless_data.ieee80211 = priv->ieee;
+	priv->wireless_data.libipw = priv->ieee;
 	dev->wireless_data = &priv->wireless_data;
 	dev->watchdog_timeo = 3 * HZ;
 	dev->irq = 0;
@@ -6076,7 +6147,7 @@ static struct net_device *ipw2100_alloc_device(struct pci_dev *pci_dev,
 	priv->ieee->ieee802_1x = 1;
 
 	/* Set module parameters */
-	switch (mode) {
+	switch (network_mode) {
 	case 1:
 		priv->ieee->iw_mode = IW_MODE_ADHOC;
 		break;
@@ -6133,8 +6204,6 @@ static struct net_device *ipw2100_alloc_device(struct pci_dev *pci_dev,
 
 	INIT_LIST_HEAD(&priv->fw_pend_list);
 	INIT_STAT(&priv->fw_pend_stat);
-
-	priv->workqueue = create_workqueue(DRV_NAME);
 
 	INIT_DELAYED_WORK(&priv->reset_work, ipw2100_reset_adapter);
 	INIT_DELAYED_WORK(&priv->security_work, ipw2100_security_work);
@@ -6202,7 +6271,7 @@ static int ipw2100_pci_init_one(struct pci_dev *pci_dev,
 		return err;
 	}
 
-	priv = ieee80211_priv(dev);
+	priv = libipw_priv(dev);
 
 	pci_set_master(pci_dev);
 	pci_set_drvdata(pci_dev, priv);
@@ -6283,9 +6352,13 @@ static int ipw2100_pci_init_one(struct pci_dev *pci_dev,
 		       "Error calling register_netdev.\n");
 		goto fail;
 	}
+	registered = 1;
+
+	err = ipw2100_wdev_init(dev);
+	if (err)
+		goto fail;
 
 	mutex_lock(&priv->action_mutex);
-	registered = 1;
 
 	IPW_DEBUG_INFO("%s: Bound to %s\n", dev->name, pci_name(pci_dev));
 
@@ -6322,7 +6395,8 @@ static int ipw2100_pci_init_one(struct pci_dev *pci_dev,
 
       fail_unlock:
 	mutex_unlock(&priv->action_mutex);
-
+	wiphy_unregister(priv->ieee->wdev.wiphy);
+	kfree(priv->ieee->bg_band.channels);
       fail:
 	if (dev) {
 		if (registered)
@@ -6335,14 +6409,14 @@ static int ipw2100_pci_init_one(struct pci_dev *pci_dev,
 		if (dev->irq)
 			free_irq(dev->irq, priv);
 
-		ipw2100_kill_workqueue(priv);
+		ipw2100_kill_works(priv);
 
 		/* These are safe to call even if they weren't allocated */
 		ipw2100_queues_free(priv);
 		sysfs_remove_group(&pci_dev->dev.kobj,
 				   &ipw2100_attribute_group);
 
-		free_ieee80211(dev);
+		free_libipw(dev, 0);
 		pci_set_drvdata(pci_dev, NULL);
 	}
 
@@ -6385,9 +6459,7 @@ static void __devexit ipw2100_pci_remove_one(struct pci_dev *pci_dev)
 		 * first, then close() will crash. */
 		unregister_netdev(dev);
 
-		/* ipw2100_down will ensure that there is no more pending work
-		 * in the workqueue's, so we can safely remove them now. */
-		ipw2100_kill_workqueue(priv);
+		ipw2100_kill_works(priv);
 
 		ipw2100_queues_free(priv);
 
@@ -6400,7 +6472,10 @@ static void __devexit ipw2100_pci_remove_one(struct pci_dev *pci_dev)
 		if (dev->base_addr)
 			iounmap((void __iomem *)dev->base_addr);
 
-		free_ieee80211(dev);
+		/* wiphy_unregister needs to be here, before free_libipw */
+		wiphy_unregister(priv->ieee->wdev.wiphy);
+		kfree(priv->ieee->bg_band.channels);
+		free_libipw(dev, 0);
 	}
 
 	pci_release_regions(pci_dev);
@@ -6487,9 +6562,19 @@ static int ipw2100_resume(struct pci_dev *pci_dev)
 }
 #endif
 
+static void ipw2100_shutdown(struct pci_dev *pci_dev)
+{
+	struct ipw2100_priv *priv = pci_get_drvdata(pci_dev);
+
+	/* Take down the device; powers it off, etc. */
+	ipw2100_down(priv);
+
+	pci_disable_device(pci_dev);
+}
+
 #define IPW2100_DEV_ID(x) { PCI_VENDOR_ID_INTEL, 0x1043, 0x8086, x }
 
-static struct pci_device_id ipw2100_pci_id_table[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(ipw2100_pci_id_table) = {
 	IPW2100_DEV_ID(0x2520),	/* IN 2100A mPCI 3A */
 	IPW2100_DEV_ID(0x2521),	/* IN 2100A mPCI 3B */
 	IPW2100_DEV_ID(0x2524),	/* IN 2100A mPCI 3B */
@@ -6550,6 +6635,7 @@ static struct pci_driver ipw2100_pci_driver = {
 	.suspend = ipw2100_suspend,
 	.resume = ipw2100_resume,
 #endif
+	.shutdown = ipw2100_shutdown,
 };
 
 /**
@@ -6568,12 +6654,13 @@ static int __init ipw2100_init(void)
 	printk(KERN_INFO DRV_NAME ": %s, %s\n", DRV_DESCRIPTION, DRV_VERSION);
 	printk(KERN_INFO DRV_NAME ": %s\n", DRV_COPYRIGHT);
 
+	pm_qos_add_request(&ipw2100_pm_qos_req, PM_QOS_CPU_DMA_LATENCY,
+			   PM_QOS_DEFAULT_VALUE);
+
 	ret = pci_register_driver(&ipw2100_pci_driver);
 	if (ret)
 		goto out;
 
-	pm_qos_add_requirement(PM_QOS_CPU_DMA_LATENCY, "ipw2100",
-			PM_QOS_DEFAULT_VALUE);
 #ifdef CONFIG_IPW2100_DEBUG
 	ipw2100_debug_level = debug;
 	ret = driver_create_file(&ipw2100_pci_driver.driver,
@@ -6595,31 +6682,11 @@ static void __exit ipw2100_exit(void)
 			   &driver_attr_debug_level);
 #endif
 	pci_unregister_driver(&ipw2100_pci_driver);
-	pm_qos_remove_requirement(PM_QOS_CPU_DMA_LATENCY, "ipw2100");
+	pm_qos_remove_request(&ipw2100_pm_qos_req);
 }
 
 module_init(ipw2100_init);
 module_exit(ipw2100_exit);
-
-#define WEXT_USECHANNELS 1
-
-static const long ipw2100_frequencies[] = {
-	2412, 2417, 2422, 2427,
-	2432, 2437, 2442, 2447,
-	2452, 2457, 2462, 2467,
-	2472, 2484
-};
-
-#define FREQ_COUNT	ARRAY_SIZE(ipw2100_frequencies)
-
-static const long ipw2100_rates_11b[] = {
-	1000000,
-	2000000,
-	5500000,
-	11000000
-};
-
-#define RATE_COUNT ARRAY_SIZE(ipw2100_rates_11b)
 
 static int ipw2100_wx_get_name(struct net_device *dev,
 			       struct iw_request_info *info,
@@ -6629,7 +6696,7 @@ static int ipw2100_wx_get_name(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	if (!(priv->status & STATUS_ASSOCIATED))
 		strcpy(wrqu->name, "unassociated");
 	else
@@ -6643,7 +6710,7 @@ static int ipw2100_wx_set_freq(struct net_device *dev,
 			       struct iw_request_info *info,
 			       union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	struct iw_freq *fwrq = &wrqu->freq;
 	int err = 0;
 
@@ -6676,7 +6743,7 @@ static int ipw2100_wx_set_freq(struct net_device *dev,
 		err = -EOPNOTSUPP;
 		goto done;
 	} else {		/* Set the channel */
-		IPW_DEBUG_WX("SET Freq/Channel -> %d \n", fwrq->m);
+		IPW_DEBUG_WX("SET Freq/Channel -> %d\n", fwrq->m);
 		err = ipw2100_set_channel(priv, fwrq->m, 0);
 	}
 
@@ -6693,7 +6760,7 @@ static int ipw2100_wx_get_freq(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	wrqu->freq.e = 0;
 
@@ -6705,7 +6772,7 @@ static int ipw2100_wx_get_freq(struct net_device *dev,
 	else
 		wrqu->freq.m = 0;
 
-	IPW_DEBUG_WX("GET Freq/Channel -> %d \n", priv->channel);
+	IPW_DEBUG_WX("GET Freq/Channel -> %d\n", priv->channel);
 	return 0;
 
 }
@@ -6714,10 +6781,10 @@ static int ipw2100_wx_set_mode(struct net_device *dev,
 			       struct iw_request_info *info,
 			       union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int err = 0;
 
-	IPW_DEBUG_WX("SET Mode -> %d \n", wrqu->mode);
+	IPW_DEBUG_WX("SET Mode -> %d\n", wrqu->mode);
 
 	if (wrqu->mode == priv->ieee->iw_mode)
 		return 0;
@@ -6757,7 +6824,7 @@ static int ipw2100_wx_get_mode(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	wrqu->mode = priv->ieee->iw_mode;
 	IPW_DEBUG_WX("GET Mode -> %d\n", wrqu->mode);
@@ -6792,7 +6859,7 @@ static int ipw2100_wx_get_range(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	struct iw_range *range = (struct iw_range *)extra;
 	u16 val;
 	int i, level;
@@ -6820,7 +6887,7 @@ static int ipw2100_wx_get_range(struct net_device *dev,
 	range->max_qual.updated = 7;	/* Updated all three */
 
 	range->avg_qual.qual = 70;	/* > 8% missed beacons is 'bad' */
-	/* TODO: Find real 'good' to 'bad' threshol value for RSSI */
+	/* TODO: Find real 'good' to 'bad' threshold value for RSSI */
 	range->avg_qual.level = 20 + IPW2100_RSSI_TO_DBM;
 	range->avg_qual.noise = 0;
 	range->avg_qual.updated = 7;	/* Updated all three */
@@ -6913,7 +6980,7 @@ static int ipw2100_wx_set_wap(struct net_device *dev,
 			      struct iw_request_info *info,
 			      union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int err = 0;
 
 	static const unsigned char any[] = {
@@ -6962,7 +7029,7 @@ static int ipw2100_wx_get_wap(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	/* If we are associated, trying to associate, or have a statically
 	 * configured BSSID then return that; otherwise return ANY */
@@ -6980,7 +7047,7 @@ static int ipw2100_wx_set_essid(struct net_device *dev,
 				struct iw_request_info *info,
 				union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	char *essid = "";	/* ANY */
 	int length = 0;
 	int err = 0;
@@ -7035,7 +7102,7 @@ static int ipw2100_wx_get_essid(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	DECLARE_SSID_BUF(ssid);
 
 	/* If we are associated, trying to associate, or have a statically
@@ -7063,7 +7130,7 @@ static int ipw2100_wx_set_nick(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	if (wrqu->data.length > IW_ESSID_MAX_SIZE)
 		return -E2BIG;
@@ -7072,7 +7139,7 @@ static int ipw2100_wx_set_nick(struct net_device *dev,
 	memset(priv->nick, 0, sizeof(priv->nick));
 	memcpy(priv->nick, extra, wrqu->data.length);
 
-	IPW_DEBUG_WX("SET Nickname -> %s \n", priv->nick);
+	IPW_DEBUG_WX("SET Nickname -> %s\n", priv->nick);
 
 	return 0;
 }
@@ -7085,13 +7152,13 @@ static int ipw2100_wx_get_nick(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	wrqu->data.length = strlen(priv->nick);
 	memcpy(extra, priv->nick, wrqu->data.length);
 	wrqu->data.flags = 1;	/* active */
 
-	IPW_DEBUG_WX("GET Nickname -> %s \n", extra);
+	IPW_DEBUG_WX("GET Nickname -> %s\n", extra);
 
 	return 0;
 }
@@ -7100,7 +7167,7 @@ static int ipw2100_wx_set_rate(struct net_device *dev,
 			       struct iw_request_info *info,
 			       union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	u32 target_rate = wrqu->bitrate.value;
 	u32 rate;
 	int err = 0;
@@ -7130,7 +7197,7 @@ static int ipw2100_wx_set_rate(struct net_device *dev,
 
 	err = ipw2100_set_tx_rates(priv, rate, 0);
 
-	IPW_DEBUG_WX("SET Rate -> %04X \n", rate);
+	IPW_DEBUG_WX("SET Rate -> %04X\n", rate);
       done:
 	mutex_unlock(&priv->action_mutex);
 	return err;
@@ -7140,7 +7207,7 @@ static int ipw2100_wx_get_rate(struct net_device *dev,
 			       struct iw_request_info *info,
 			       union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int val;
 	unsigned int len = sizeof(val);
 	int err = 0;
@@ -7181,7 +7248,7 @@ static int ipw2100_wx_get_rate(struct net_device *dev,
 		wrqu->bitrate.value = 0;
 	}
 
-	IPW_DEBUG_WX("GET Rate -> %d \n", wrqu->bitrate.value);
+	IPW_DEBUG_WX("GET Rate -> %d\n", wrqu->bitrate.value);
 
       done:
 	mutex_unlock(&priv->action_mutex);
@@ -7192,7 +7259,7 @@ static int ipw2100_wx_set_rts(struct net_device *dev,
 			      struct iw_request_info *info,
 			      union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int value, err;
 
 	/* Auto RTS not yet supported */
@@ -7217,7 +7284,7 @@ static int ipw2100_wx_set_rts(struct net_device *dev,
 
 	err = ipw2100_set_rts_threshold(priv, value);
 
-	IPW_DEBUG_WX("SET RTS Threshold -> 0x%08X \n", value);
+	IPW_DEBUG_WX("SET RTS Threshold -> 0x%08X\n", value);
       done:
 	mutex_unlock(&priv->action_mutex);
 	return err;
@@ -7231,7 +7298,7 @@ static int ipw2100_wx_get_rts(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	wrqu->rts.value = priv->rts_threshold & ~RTS_DISABLED;
 	wrqu->rts.fixed = 1;	/* no auto select */
@@ -7239,7 +7306,7 @@ static int ipw2100_wx_get_rts(struct net_device *dev,
 	/* If RTS is set to the default value, then it is disabled */
 	wrqu->rts.disabled = (priv->rts_threshold & RTS_DISABLED) ? 1 : 0;
 
-	IPW_DEBUG_WX("GET RTS Threshold -> 0x%08X \n", wrqu->rts.value);
+	IPW_DEBUG_WX("GET RTS Threshold -> 0x%08X\n", wrqu->rts.value);
 
 	return 0;
 }
@@ -7248,7 +7315,7 @@ static int ipw2100_wx_set_txpow(struct net_device *dev,
 				struct iw_request_info *info,
 				union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int err = 0, value;
 	
 	if (ipw_radio_kill_sw(priv, wrqu->txpower.disabled))
@@ -7278,7 +7345,7 @@ static int ipw2100_wx_set_txpow(struct net_device *dev,
 
 	err = ipw2100_set_tx_power(priv, value);
 
-	IPW_DEBUG_WX("SET TX Power -> %d \n", value);
+	IPW_DEBUG_WX("SET TX Power -> %d\n", value);
 
       done:
 	mutex_unlock(&priv->action_mutex);
@@ -7293,7 +7360,7 @@ static int ipw2100_wx_get_txpow(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	wrqu->txpower.disabled = (priv->status & STATUS_RF_KILL_MASK) ? 1 : 0;
 
@@ -7307,7 +7374,7 @@ static int ipw2100_wx_get_txpow(struct net_device *dev,
 
 	wrqu->txpower.flags = IW_TXPOW_DBM;
 
-	IPW_DEBUG_WX("GET TX Power -> %d \n", wrqu->txpower.value);
+	IPW_DEBUG_WX("GET TX Power -> %d\n", wrqu->txpower.value);
 
 	return 0;
 }
@@ -7320,7 +7387,7 @@ static int ipw2100_wx_set_frag(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	if (!wrqu->frag.fixed)
 		return -EINVAL;
@@ -7337,7 +7404,7 @@ static int ipw2100_wx_set_frag(struct net_device *dev,
 		priv->frag_threshold = priv->ieee->fts;
 	}
 
-	IPW_DEBUG_WX("SET Frag Threshold -> %d \n", priv->ieee->fts);
+	IPW_DEBUG_WX("SET Frag Threshold -> %d\n", priv->ieee->fts);
 
 	return 0;
 }
@@ -7350,12 +7417,12 @@ static int ipw2100_wx_get_frag(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	wrqu->frag.value = priv->frag_threshold & ~FRAG_DISABLED;
 	wrqu->frag.fixed = 0;	/* no auto select */
 	wrqu->frag.disabled = (priv->frag_threshold & FRAG_DISABLED) ? 1 : 0;
 
-	IPW_DEBUG_WX("GET Frag Threshold -> %d \n", wrqu->frag.value);
+	IPW_DEBUG_WX("GET Frag Threshold -> %d\n", wrqu->frag.value);
 
 	return 0;
 }
@@ -7364,7 +7431,7 @@ static int ipw2100_wx_set_retry(struct net_device *dev,
 				struct iw_request_info *info,
 				union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int err = 0;
 
 	if (wrqu->retry.flags & IW_RETRY_LIFETIME || wrqu->retry.disabled)
@@ -7381,14 +7448,14 @@ static int ipw2100_wx_set_retry(struct net_device *dev,
 
 	if (wrqu->retry.flags & IW_RETRY_SHORT) {
 		err = ipw2100_set_short_retry(priv, wrqu->retry.value);
-		IPW_DEBUG_WX("SET Short Retry Limit -> %d \n",
+		IPW_DEBUG_WX("SET Short Retry Limit -> %d\n",
 			     wrqu->retry.value);
 		goto done;
 	}
 
 	if (wrqu->retry.flags & IW_RETRY_LONG) {
 		err = ipw2100_set_long_retry(priv, wrqu->retry.value);
-		IPW_DEBUG_WX("SET Long Retry Limit -> %d \n",
+		IPW_DEBUG_WX("SET Long Retry Limit -> %d\n",
 			     wrqu->retry.value);
 		goto done;
 	}
@@ -7397,7 +7464,7 @@ static int ipw2100_wx_set_retry(struct net_device *dev,
 	if (!err)
 		err = ipw2100_set_long_retry(priv, wrqu->retry.value);
 
-	IPW_DEBUG_WX("SET Both Retry Limits -> %d \n", wrqu->retry.value);
+	IPW_DEBUG_WX("SET Both Retry Limits -> %d\n", wrqu->retry.value);
 
       done:
 	mutex_unlock(&priv->action_mutex);
@@ -7412,7 +7479,7 @@ static int ipw2100_wx_get_retry(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	wrqu->retry.disabled = 0;	/* can't be disabled */
 
@@ -7431,7 +7498,7 @@ static int ipw2100_wx_get_retry(struct net_device *dev,
 		wrqu->retry.value = priv->short_retry_limit;
 	}
 
-	IPW_DEBUG_WX("GET Retry -> %d \n", wrqu->retry.value);
+	IPW_DEBUG_WX("GET Retry -> %d\n", wrqu->retry.value);
 
 	return 0;
 }
@@ -7440,7 +7507,7 @@ static int ipw2100_wx_set_scan(struct net_device *dev,
 			       struct iw_request_info *info,
 			       union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int err = 0;
 
 	mutex_lock(&priv->action_mutex);
@@ -7472,8 +7539,8 @@ static int ipw2100_wx_get_scan(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
-	return ieee80211_wx_get_scan(priv->ieee, info, wrqu, extra);
+	struct ipw2100_priv *priv = libipw_priv(dev);
+	return libipw_wx_get_scan(priv->ieee, info, wrqu, extra);
 }
 
 /*
@@ -7487,8 +7554,8 @@ static int ipw2100_wx_set_encode(struct net_device *dev,
 	 * No check of STATUS_INITIALIZED required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
-	return ieee80211_wx_set_encode(priv->ieee, info, wrqu, key);
+	struct ipw2100_priv *priv = libipw_priv(dev);
+	return libipw_wx_set_encode(priv->ieee, info, wrqu, key);
 }
 
 static int ipw2100_wx_get_encode(struct net_device *dev,
@@ -7499,15 +7566,15 @@ static int ipw2100_wx_get_encode(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
-	return ieee80211_wx_get_encode(priv->ieee, info, wrqu, key);
+	struct ipw2100_priv *priv = libipw_priv(dev);
+	return libipw_wx_get_encode(priv->ieee, info, wrqu, key);
 }
 
 static int ipw2100_wx_set_power(struct net_device *dev,
 				struct iw_request_info *info,
 				union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int err = 0;
 
 	mutex_lock(&priv->action_mutex);
@@ -7556,7 +7623,7 @@ static int ipw2100_wx_get_power(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	if (!(priv->power_mode & IPW_POWER_ENABLED))
 		wrqu->power.disabled = 1;
@@ -7580,8 +7647,8 @@ static int ipw2100_wx_set_genie(struct net_device *dev,
 				union iwreq_data *wrqu, char *extra)
 {
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
-	struct ieee80211_device *ieee = priv->ieee;
+	struct ipw2100_priv *priv = libipw_priv(dev);
+	struct libipw_device *ieee = priv->ieee;
 	u8 *buf;
 
 	if (!ieee->wpa_enabled)
@@ -7615,8 +7682,8 @@ static int ipw2100_wx_get_genie(struct net_device *dev,
 				struct iw_request_info *info,
 				union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
-	struct ieee80211_device *ieee = priv->ieee;
+	struct ipw2100_priv *priv = libipw_priv(dev);
+	struct libipw_device *ieee = priv->ieee;
 
 	if (ieee->wpa_ie_len == 0 || ieee->wpa_ie == NULL) {
 		wrqu->data.length = 0;
@@ -7637,8 +7704,8 @@ static int ipw2100_wx_set_auth(struct net_device *dev,
 			       struct iw_request_info *info,
 			       union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
-	struct ieee80211_device *ieee = priv->ieee;
+	struct ipw2100_priv *priv = libipw_priv(dev);
+	struct libipw_device *ieee = priv->ieee;
 	struct iw_param *param = &wrqu->param;
 	struct lib80211_crypt_data *crypt;
 	unsigned long flags;
@@ -7682,7 +7749,7 @@ static int ipw2100_wx_set_auth(struct net_device *dev,
 			 * can use this to determine if the CAP_PRIVACY_ON bit should
 			 * be set.
 			 */
-			struct ieee80211_security sec = {
+			struct libipw_security sec = {
 				.flags = SEC_ENABLED,
 				.enabled = param->value,
 			};
@@ -7730,8 +7797,8 @@ static int ipw2100_wx_get_auth(struct net_device *dev,
 			       struct iw_request_info *info,
 			       union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
-	struct ieee80211_device *ieee = priv->ieee;
+	struct ipw2100_priv *priv = libipw_priv(dev);
+	struct libipw_device *ieee = priv->ieee;
 	struct lib80211_crypt_data *crypt;
 	struct iw_param *param = &wrqu->param;
 	int ret = 0;
@@ -7792,8 +7859,8 @@ static int ipw2100_wx_set_encodeext(struct net_device *dev,
 				    struct iw_request_info *info,
 				    union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
-	return ieee80211_wx_set_encodeext(priv->ieee, info, wrqu, extra);
+	struct ipw2100_priv *priv = libipw_priv(dev);
+	return libipw_wx_set_encodeext(priv->ieee, info, wrqu, extra);
 }
 
 /* SIOCGIWENCODEEXT */
@@ -7801,8 +7868,8 @@ static int ipw2100_wx_get_encodeext(struct net_device *dev,
 				    struct iw_request_info *info,
 				    union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
-	return ieee80211_wx_get_encodeext(priv->ieee, info, wrqu, extra);
+	struct ipw2100_priv *priv = libipw_priv(dev);
+	return libipw_wx_get_encodeext(priv->ieee, info, wrqu, extra);
 }
 
 /* SIOCSIWMLME */
@@ -7810,7 +7877,7 @@ static int ipw2100_wx_set_mlme(struct net_device *dev,
 			       struct iw_request_info *info,
 			       union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	struct iw_mlme *mlme = (struct iw_mlme *)extra;
 	__le16 reason;
 
@@ -7841,7 +7908,7 @@ static int ipw2100_wx_set_promisc(struct net_device *dev,
 				  struct iw_request_info *info,
 				  union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int *parms = (int *)extra;
 	int enable = (parms[0] > 0);
 	int err = 0;
@@ -7872,7 +7939,7 @@ static int ipw2100_wx_reset(struct net_device *dev,
 			    struct iw_request_info *info,
 			    union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	if (priv->status & STATUS_INITIALIZED)
 		schedule_reset(priv);
 	return 0;
@@ -7884,7 +7951,7 @@ static int ipw2100_wx_set_powermode(struct net_device *dev,
 				    struct iw_request_info *info,
 				    union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int err = 0, mode = *(int *)extra;
 
 	mutex_lock(&priv->action_mutex);
@@ -7912,7 +7979,7 @@ static int ipw2100_wx_get_powermode(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int level = IPW_POWER_LEVEL(priv->power_mode);
 	s32 timeout, period;
 
@@ -7948,7 +8015,7 @@ static int ipw2100_wx_set_preamble(struct net_device *dev,
 				   struct iw_request_info *info,
 				   union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int err, mode = *(int *)extra;
 
 	mutex_lock(&priv->action_mutex);
@@ -7981,7 +8048,7 @@ static int ipw2100_wx_get_preamble(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	if (priv->config & CFG_LONG_PREAMBLE)
 		snprintf(wrqu->name, IFNAMSIZ, "long (1)");
@@ -7996,7 +8063,7 @@ static int ipw2100_wx_set_crc_check(struct net_device *dev,
 				    struct iw_request_info *info,
 				    union iwreq_data *wrqu, char *extra)
 {
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	int err, mode = *(int *)extra;
 
 	mutex_lock(&priv->action_mutex);
@@ -8028,7 +8095,7 @@ static int ipw2100_wx_get_crc_check(struct net_device *dev,
 	 * This can be called at any time.  No action lock required
 	 */
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 
 	if (priv->config & CFG_CRC_CHECK)
 		snprintf(wrqu->name, IFNAMSIZ, "CRC checked (1)");
@@ -8179,10 +8246,11 @@ static struct iw_statistics *ipw2100_wx_wireless_stats(struct net_device *dev)
 	int rssi_qual;
 	int tx_qual;
 	int beacon_qual;
+	int quality;
 
-	struct ipw2100_priv *priv = ieee80211_priv(dev);
+	struct ipw2100_priv *priv = libipw_priv(dev);
 	struct iw_statistics *wstats;
-	u32 rssi, quality, tx_retries, missed_beacons, tx_failures;
+	u32 rssi, tx_retries, missed_beacons, tx_failures;
 	u32 ord_len = sizeof(u32);
 
 	if (!priv)
@@ -8265,7 +8333,8 @@ static struct iw_statistics *ipw2100_wx_wireless_stats(struct net_device *dev)
 			beacon_qual = (20 - missed_beacons) *
 			    (PERFECT - VERY_GOOD) / 20 + VERY_GOOD;
 
-		quality = min(beacon_qual, min(tx_qual, rssi_qual));
+		quality = min(tx_qual, rssi_qual);
+		quality = min(beacon_qual, quality);
 
 #ifdef CONFIG_IPW2100_DEBUG
 		if (beacon_qual == quality)
@@ -8396,7 +8465,7 @@ struct ipw2100_fw_header {
 	short mode;
 	unsigned int fw_size;
 	unsigned int uc_size;
-} __attribute__ ((packed));
+} __packed;
 
 static int ipw2100_mod_firmware_load(struct ipw2100_fw *fw)
 {
@@ -8459,6 +8528,12 @@ static int ipw2100_get_firmware(struct ipw2100_priv *priv,
 
 	return 0;
 }
+
+MODULE_FIRMWARE(IPW2100_FW_NAME("-i"));
+#ifdef CONFIG_IPW2100_MONITOR
+MODULE_FIRMWARE(IPW2100_FW_NAME("-p"));
+#endif
+MODULE_FIRMWARE(IPW2100_FW_NAME(""));
 
 static void ipw2100_release_firmware(struct ipw2100_priv *priv,
 				     struct ipw2100_fw *fw)

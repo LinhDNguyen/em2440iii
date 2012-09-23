@@ -129,7 +129,7 @@ static inline __attribute_const__ int get_order(unsigned long size)
 
 #else
 
-# include <asm-generic/page.h>
+# include <asm-generic/getorder.h>
 
 #endif
 
@@ -170,10 +170,6 @@ extern void copy_user_page(void*, void*, unsigned long, struct page*);
 #define page_to_virt(page)	__va(page_to_pfn(page) << PAGE_SHIFT)
 #define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
 #define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
-
-#ifdef CONFIG_MMU
-#define WANT_PAGE_VIRTUAL
-#endif
 
 #endif /* __ASSEMBLY__ */
 

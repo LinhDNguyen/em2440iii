@@ -25,6 +25,8 @@ COPYRIGHT:www.embedsky.net
 #include <linux/cdev.h>
 #include <linux/miscdevice.h>
 
+#include <linux/sched.h>
+
 #include "tq2440_adc.h"
 
 #undef DEBUG
@@ -46,7 +48,7 @@ typedef struct
 	int prescale;
 }ADC_DEV;
 
-DECLARE_MUTEX(ADC_LOCK);
+DEFINE_SEMAPHORE(ADC_LOCK);
 static int ADC_enable = 0;
 
 static ADC_DEV adcdev;

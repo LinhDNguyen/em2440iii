@@ -62,6 +62,7 @@ typedef enum fe_caps {
 	FE_CAN_8VSB			= 0x200000,
 	FE_CAN_16VSB			= 0x400000,
 	FE_HAS_EXTENDED_CAPS		= 0x800000,   /* We need more bitspace for newer APIs, indicate this. */
+	FE_CAN_TURBO_FEC		= 0x8000000,  /* frontend supports "turbo fec modulation" */
 	FE_CAN_2G_MODULATION		= 0x10000000, /* frontend supports "2nd generation modulation" (DVB-S2) */
 	FE_NEEDS_BENDING		= 0x20000000, /* not supported anymore, don't use (frontend requires frequency bending) */
 	FE_CAN_RECOVER			= 0x40000000, /* frontend can recover from a cable unplug automatically */
@@ -173,14 +174,21 @@ typedef enum fe_modulation {
 typedef enum fe_transmit_mode {
 	TRANSMISSION_MODE_2K,
 	TRANSMISSION_MODE_8K,
-	TRANSMISSION_MODE_AUTO
+	TRANSMISSION_MODE_AUTO,
+	TRANSMISSION_MODE_4K,
+	TRANSMISSION_MODE_1K,
+	TRANSMISSION_MODE_16K,
+	TRANSMISSION_MODE_32K,
 } fe_transmit_mode_t;
 
 typedef enum fe_bandwidth {
 	BANDWIDTH_8_MHZ,
 	BANDWIDTH_7_MHZ,
 	BANDWIDTH_6_MHZ,
-	BANDWIDTH_AUTO
+	BANDWIDTH_AUTO,
+	BANDWIDTH_5_MHZ,
+	BANDWIDTH_10_MHZ,
+	BANDWIDTH_1_712_MHZ,
 } fe_bandwidth_t;
 
 
@@ -189,7 +197,10 @@ typedef enum fe_guard_interval {
 	GUARD_INTERVAL_1_16,
 	GUARD_INTERVAL_1_8,
 	GUARD_INTERVAL_1_4,
-	GUARD_INTERVAL_AUTO
+	GUARD_INTERVAL_AUTO,
+	GUARD_INTERVAL_1_128,
+	GUARD_INTERVAL_19_128,
+	GUARD_INTERVAL_19_256,
 } fe_guard_interval_t;
 
 
@@ -268,15 +279,44 @@ struct dvb_frontend_event {
 #define DTV_FE_CAPABILITY	16
 #define DTV_DELIVERY_SYSTEM	17
 
-#define DTV_API_VERSION				35
-#define DTV_API_VERSION				35
-#define DTV_CODE_RATE_HP			36
-#define DTV_CODE_RATE_LP			37
-#define DTV_GUARD_INTERVAL			38
-#define DTV_TRANSMISSION_MODE			39
-#define DTV_HIERARCHY				40
+/* ISDB-T and ISDB-Tsb */
+#define DTV_ISDBT_PARTIAL_RECEPTION	18
+#define DTV_ISDBT_SOUND_BROADCASTING	19
 
-#define DTV_MAX_COMMAND				DTV_HIERARCHY
+#define DTV_ISDBT_SB_SUBCHANNEL_ID	20
+#define DTV_ISDBT_SB_SEGMENT_IDX	21
+#define DTV_ISDBT_SB_SEGMENT_COUNT	22
+
+#define DTV_ISDBT_LAYERA_FEC			23
+#define DTV_ISDBT_LAYERA_MODULATION		24
+#define DTV_ISDBT_LAYERA_SEGMENT_COUNT		25
+#define DTV_ISDBT_LAYERA_TIME_INTERLEAVING	26
+
+#define DTV_ISDBT_LAYERB_FEC			27
+#define DTV_ISDBT_LAYERB_MODULATION		28
+#define DTV_ISDBT_LAYERB_SEGMENT_COUNT		29
+#define DTV_ISDBT_LAYERB_TIME_INTERLEAVING	30
+
+#define DTV_ISDBT_LAYERC_FEC			31
+#define DTV_ISDBT_LAYERC_MODULATION		32
+#define DTV_ISDBT_LAYERC_SEGMENT_COUNT		33
+#define DTV_ISDBT_LAYERC_TIME_INTERLEAVING	34
+
+#define DTV_API_VERSION		35
+
+#define DTV_CODE_RATE_HP	36
+#define DTV_CODE_RATE_LP	37
+#define DTV_GUARD_INTERVAL	38
+#define DTV_TRANSMISSION_MODE	39
+#define DTV_HIERARCHY		40
+
+#define DTV_ISDBT_LAYER_ENABLED	41
+
+#define DTV_ISDBS_TS_ID		42
+
+#define DTV_DVBT2_PLP_ID	43
+
+#define DTV_MAX_COMMAND				DTV_DVBT2_PLP_ID
 
 typedef enum fe_pilot {
 	PILOT_ON,
@@ -308,6 +348,7 @@ typedef enum fe_delivery_system {
 	SYS_DMBTH,
 	SYS_CMMB,
 	SYS_DAB,
+	SYS_DVBT2,
 } fe_delivery_system_t;
 
 struct dtv_cmds_h {

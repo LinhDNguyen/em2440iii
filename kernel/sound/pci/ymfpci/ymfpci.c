@@ -66,13 +66,13 @@ MODULE_PARM_DESC(joystick_port, "Joystick port address");
 module_param_array(rear_switch, bool, NULL, 0444);
 MODULE_PARM_DESC(rear_switch, "Enable shared rear/line-in switch");
 
-static struct pci_device_id snd_ymfpci_ids[] = {
-        { 0x1073, 0x0004, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },   /* YMF724 */
-        { 0x1073, 0x000d, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },   /* YMF724F */
-        { 0x1073, 0x000a, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },   /* YMF740 */
-        { 0x1073, 0x000c, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },   /* YMF740C */
-        { 0x1073, 0x0010, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },   /* YMF744 */
-        { 0x1073, 0x0012, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },   /* YMF754 */
+static DEFINE_PCI_DEVICE_TABLE(snd_ymfpci_ids) = {
+	{ PCI_VDEVICE(YAMAHA, 0x0004), 0, },   /* YMF724 */
+	{ PCI_VDEVICE(YAMAHA, 0x000d), 0, },   /* YMF724F */
+	{ PCI_VDEVICE(YAMAHA, 0x000a), 0, },   /* YMF740 */
+	{ PCI_VDEVICE(YAMAHA, 0x000c), 0, },   /* YMF740C */
+	{ PCI_VDEVICE(YAMAHA, 0x0010), 0, },   /* YMF744 */
+	{ PCI_VDEVICE(YAMAHA, 0x0012), 0, },   /* YMF754 */
 	{ 0, }
 };
 
@@ -187,9 +187,9 @@ static int __devinit snd_card_ymfpci_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	switch (pci_id->device) {
 	case 0x0004: str = "YMF724";  model = "DS-1"; break;
@@ -345,7 +345,7 @@ static void __devexit snd_card_ymfpci_remove(struct pci_dev *pci)
 }
 
 static struct pci_driver driver = {
-	.name = "Yamaha DS-1 PCI",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_ymfpci_ids,
 	.probe = snd_card_ymfpci_probe,
 	.remove = __devexit_p(snd_card_ymfpci_remove),

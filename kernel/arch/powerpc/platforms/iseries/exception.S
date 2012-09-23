@@ -31,6 +31,7 @@
 #include <asm/thread_info.h>
 #include <asm/ptrace.h>
 #include <asm/cputable.h>
+#include <asm/mmu.h>
 
 #include "exception.h"
 
@@ -43,17 +44,14 @@ system_reset_iSeries:
 	LOAD_REG_ADDR(r23, alpaca)
 	li	r0,ALPACA_SIZE
 	sub	r23,r13,r23
-	divdu	r23,r23,r0		/* r23 has cpu number */
-	LOAD_REG_ADDR(r13, paca)
-	mulli	r0,r23,PACA_SIZE
-	add	r13,r13,r0
-	mtspr	SPRN_SPRG3,r13		/* Save it away for the future */
-	mfmsr	r24
-	ori	r24,r24,MSR_RI
-	mtmsrd	r24			/* RI on */
-	mr	r24,r23
+	divdu	r24,r23,r0		/* r24 has cpu number */
 	cmpwi	0,r24,0			/* Are we processor 0? */
 	bne	1f
+	LOAD_REG_ADDR(r13, boot_paca)
+	mtspr	SPRN_SPRG_PACA,r13	/* Save it away for the future */
+	mfmsr	r23
+	ori	r23,r23,MSR_RI
+	mtmsrd	r23			/* RI on */
 	b	.__start_initialization_iSeries	/* Start up the first processor */
 1:	mfspr	r4,SPRN_CTRLF
 	li	r5,CTRL_RUNLATCH	/* Turn off the run light */
@@ -63,33 +61,59 @@ system_reset_iSeries:
 /* Spin on __secondary_hold_spinloop until it is updated by the boot cpu. */
 /* In the UP case we'll yield() later, and we will not access the paca anyway */
 #ifdef CONFIG_SMP
-1:
+iSeries_secondary_wait_paca:
 	HMT_LOW
 	LOAD_REG_ADDR(r23, __secondary_hold_spinloop)
 	ld	r23,0(r23)
-	sync
-	LOAD_REG_ADDR(r3,current_set)
-	sldi	r28,r24,3		/* get current_set[cpu#] */
-	ldx	r3,r3,r28
-	addi	r1,r3,THREAD_SIZE
-	subi	r1,r1,STACK_FRAME_OVERHEAD
 
-	cmpwi	0,r23,0			/* Keep poking the Hypervisor until */
-	bne	2f			/* we're released */
+	cmpdi	0,r23,0
+	bne	2f			/* go on when the master is ready */
+
+	/* Keep poking the Hypervisor until we're released */
+	/* 8002 is a call to HvCallCfg::getLps, a harmless Hypervisor function */
+	lis	r3,0x8002
+	rldicr	r3,r3,32,15		/* r0 = (r3 << 32) & 0xffff000000000000 */
+	li	r0,-1			/* r0=-1 indicates a Hypervisor call */
+	sc				/* Invoke the hypervisor via a system call */
+	b	iSeries_secondary_wait_paca
+
+2:
+	HMT_MEDIUM
+	sync
+
+	LOAD_REG_ADDR(r3, nr_cpu_ids)	/* get number of pacas allocated */
+	lwz	r3,0(r3)		/* nr_cpus= or NR_CPUS can limit */
+	cmpld	0,r24,r3		/* is our cpu number allocated? */
+	bge	iSeries_secondary_yield	/* no, yield forever */
+
+	/* Load our paca now that it's been allocated */
+	LOAD_REG_ADDR(r13, paca)
+	ld	r13,0(r13)
+	mulli	r0,r24,PACA_SIZE
+	add	r13,r13,r0
+	mtspr	SPRN_SPRG_PACA,r13	/* Save it away for the future */
+	mfmsr	r23
+	ori	r23,r23,MSR_RI
+	mtmsrd	r23			/* RI on */
+
+iSeries_secondary_smp_loop:
+	lbz	r23,PACAPROCSTART(r13)	/* Test if this processor
+					 * should start */
+	cmpwi	0,r23,0
+	bne	3f			/* go on when we are told */
+
+	HMT_LOW
 	/* Let the Hypervisor know we are alive */
 	/* 8002 is a call to HvCallCfg::getLps, a harmless Hypervisor function */
 	lis	r3,0x8002
 	rldicr	r3,r3,32,15		/* r0 = (r3 << 32) & 0xffff000000000000 */
 	li	r0,-1			/* r0=-1 indicates a Hypervisor call */
 	sc				/* Invoke the hypervisor via a system call */
-	b	1b
-#endif
+	mfspr	r13,SPRN_SPRG_PACA	/* Put r13 back ???? */
+	b	iSeries_secondary_smp_loop /* wait for signal to start */
 
-2:
-	HMT_LOW
-#ifdef CONFIG_SMP
-	lbz	r23,PACAPROCSTART(r13)	/* Test if this processor
-					 * should start */
+3:
+	HMT_MEDIUM
 	sync
 	LOAD_REG_ADDR(r3,current_set)
 	sldi	r28,r24,3		/* get current_set[cpu#] */
@@ -97,27 +121,22 @@ system_reset_iSeries:
 	addi	r1,r3,THREAD_SIZE
 	subi	r1,r1,STACK_FRAME_OVERHEAD
 
-	cmpwi	0,r23,0
-	beq	iSeries_secondary_smp_loop	/* Loop until told to go */
 	b	__secondary_start		/* Loop until told to go */
-iSeries_secondary_smp_loop:
-	/* Let the Hypervisor know we are alive */
-	/* 8002 is a call to HvCallCfg::getLps, a harmless Hypervisor function */
-	lis	r3,0x8002
-	rldicr	r3,r3,32,15		/* r0 = (r3 << 32) & 0xffff000000000000 */
-#else /* CONFIG_SMP */
+#endif /* CONFIG_SMP */
+
+iSeries_secondary_yield:
 	/* Yield the processor.  This is required for non-SMP kernels
 		which are running on multi-threaded machines. */
+	HMT_LOW
 	lis	r3,0x8000
 	rldicr	r3,r3,32,15		/* r3 = (r3 << 32) & 0xffff000000000000 */
 	addi	r3,r3,18		/* r3 = 0x8000000000000012 which is "yield" */
 	li	r4,0			/* "yield timed" */
 	li	r5,-1			/* "yield forever" */
-#endif /* CONFIG_SMP */
 	li	r0,-1			/* r0=-1 indicates a Hypervisor call */
 	sc				/* Invoke the hypervisor via a system call */
-	mfspr	r13,SPRN_SPRG3		/* Put r13 back ???? */
-	b	2b			/* If SMP not configured, secondaries
+	mfspr	r13,SPRN_SPRG_PACA	/* Put r13 back ???? */
+	b	iSeries_secondary_yield	/* If SMP not configured, secondaries
 					 * loop forever */
 
 /***  ISeries-LPAR interrupt handlers ***/
@@ -126,34 +145,45 @@ iSeries_secondary_smp_loop:
 
 	.globl data_access_iSeries
 data_access_iSeries:
-	mtspr	SPRN_SPRG1,r13
+	mtspr	SPRN_SPRG_SCRATCH0,r13
 BEGIN_FTR_SECTION
-	mtspr	SPRN_SPRG2,r12
-	mfspr	r13,SPRN_DAR
-	mfspr	r12,SPRN_DSISR
-	srdi	r13,r13,60
-	rlwimi	r13,r12,16,0x20
-	mfcr	r12
-	cmpwi	r13,0x2c
+	mfspr	r13,SPRN_SPRG_PACA
+	std	r9,PACA_EXSLB+EX_R9(r13)
+	std	r10,PACA_EXSLB+EX_R10(r13)
+	mfspr	r10,SPRN_DAR
+	mfspr	r9,SPRN_DSISR
+	srdi	r10,r10,60
+	rlwimi	r10,r9,16,0x20
+	mfcr	r9
+	cmpwi	r10,0x2c
 	beq	.do_stab_bolted_iSeries
-	mtcrf	0x80,r12
-	mfspr	r12,SPRN_SPRG2
-END_FTR_SECTION_IFCLR(CPU_FTR_SLB)
-	EXCEPTION_PROLOG_1(PACA_EXGEN)
+	ld	r10,PACA_EXSLB+EX_R10(r13)
+	std	r11,PACA_EXGEN+EX_R11(r13)
+	ld	r11,PACA_EXSLB+EX_R9(r13)
+	std	r12,PACA_EXGEN+EX_R12(r13)
+	mfspr	r12,SPRN_SPRG_SCRATCH0
+	std	r10,PACA_EXGEN+EX_R10(r13)
+	std	r11,PACA_EXGEN+EX_R9(r13)
+	std	r12,PACA_EXGEN+EX_R13(r13)
 	EXCEPTION_PROLOG_ISERIES_1
+FTR_SECTION_ELSE
+	EXCEPTION_PROLOG_1(PACA_EXGEN, NOTEST, 0)
+	EXCEPTION_PROLOG_ISERIES_1
+ALT_MMU_FTR_SECTION_END_IFCLR(MMU_FTR_SLB)
 	b	data_access_common
 
 .do_stab_bolted_iSeries:
-	mtcrf	0x80,r12
-	mfspr	r12,SPRN_SPRG2
-	EXCEPTION_PROLOG_1(PACA_EXSLB)
+	std	r11,PACA_EXSLB+EX_R11(r13)
+	std	r12,PACA_EXSLB+EX_R12(r13)
+	mfspr	r10,SPRN_SPRG_SCRATCH0
+	std	r10,PACA_EXSLB+EX_R13(r13)
 	EXCEPTION_PROLOG_ISERIES_1
 	b	.do_stab_bolted
 
 	.globl	data_access_slb_iSeries
 data_access_slb_iSeries:
-	mtspr	SPRN_SPRG1,r13		/* save r13 */
-	mfspr	r13,SPRN_SPRG3		/* get paca address into r13 */
+	mtspr	SPRN_SPRG_SCRATCH0,r13	/* save r13 */
+	mfspr	r13,SPRN_SPRG_PACA	/* get paca address into r13 */
 	std	r3,PACA_EXSLB+EX_R3(r13)
 	mfspr	r3,SPRN_DAR
 	std	r9,PACA_EXSLB+EX_R9(r13)
@@ -165,7 +195,7 @@ data_access_slb_iSeries:
 	std	r10,PACA_EXSLB+EX_R10(r13)
 	std	r11,PACA_EXSLB+EX_R11(r13)
 	std	r12,PACA_EXSLB+EX_R12(r13)
-	mfspr	r10,SPRN_SPRG1
+	mfspr	r10,SPRN_SPRG_SCRATCH0
 	std	r10,PACA_EXSLB+EX_R13(r13)
 	ld	r12,PACALPPACAPTR(r13)
 	ld	r12,LPPACASRR1(r12)
@@ -175,8 +205,8 @@ data_access_slb_iSeries:
 
 	.globl	instruction_access_slb_iSeries
 instruction_access_slb_iSeries:
-	mtspr	SPRN_SPRG1,r13		/* save r13 */
-	mfspr	r13,SPRN_SPRG3		/* get paca address into r13 */
+	mtspr	SPRN_SPRG_SCRATCH0,r13	/* save r13 */
+	mfspr	r13,SPRN_SPRG_PACA	/* get paca address into r13 */
 	std	r3,PACA_EXSLB+EX_R3(r13)
 	ld	r3,PACALPPACAPTR(r13)
 	ld	r3,LPPACASRR0(r3)	/* get SRR0 value */
@@ -189,7 +219,7 @@ instruction_access_slb_iSeries:
 	std	r10,PACA_EXSLB+EX_R10(r13)
 	std	r11,PACA_EXSLB+EX_R11(r13)
 	std	r12,PACA_EXSLB+EX_R12(r13)
-	mfspr	r10,SPRN_SPRG1
+	mfspr	r10,SPRN_SPRG_SCRATCH0
 	std	r10,PACA_EXSLB+EX_R13(r13)
 	ld	r12,PACALPPACAPTR(r13)
 	ld	r12,LPPACASRR1(r12)
@@ -200,7 +230,7 @@ slb_miss_user_iseries:
 	std	r10,PACA_EXGEN+EX_R10(r13)
 	std	r11,PACA_EXGEN+EX_R11(r13)
 	std	r12,PACA_EXGEN+EX_R12(r13)
-	mfspr	r10,SPRG1
+	mfspr	r10,SPRG_SCRATCH0
 	ld	r11,PACA_EXSLB+EX_R9(r13)
 	ld	r12,PACA_EXSLB+EX_R3(r13)
 	std	r10,PACA_EXGEN+EX_R13(r13)
@@ -221,7 +251,7 @@ slb_miss_user_iseries:
 	.globl	system_call_iSeries
 system_call_iSeries:
 	mr	r9,r13
-	mfspr	r13,SPRN_SPRG3
+	mfspr	r13,SPRN_SPRG_PACA
 	EXCEPTION_PROLOG_ISERIES_1
 	b	system_call_common
 
@@ -234,8 +264,8 @@ decrementer_iSeries_masked:
 	li	r11,1
 	ld	r12,PACALPPACAPTR(r13)
 	stb	r11,LPPACADECRINT(r12)
-	LOAD_REG_IMMEDIATE(r12, tb_ticks_per_jiffy)
-	lwz	r12,0(r12)
+	li	r12,-1
+	clrldi	r12,r12,33	/* set DEC to 0x7fffffff */
 	mtspr	SPRN_DEC,r12
 	/* fall through */
 

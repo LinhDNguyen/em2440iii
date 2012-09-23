@@ -30,6 +30,7 @@
  */
 
 #include <linux/if_arp.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/datalink.h>
 #include <net/psnap.h>
@@ -599,7 +600,7 @@ int aarp_send_ddp(struct net_device *dev, struct sk_buff *skb,
 
 	/* Non ELAP we cannot do. */
 	if (dev->type != ARPHRD_ETHER)
-		return -1;
+		goto free_it;
 
 	skb->dev = dev;
 	skb->protocol = htons(ETH_P_ATALK);
@@ -634,7 +635,7 @@ int aarp_send_ddp(struct net_device *dev, struct sk_buff *skb,
 	if (!a) {
 		/* Whoops slipped... good job it's an unreliable protocol 8) */
 		write_unlock_bh(&aarp_lock);
-		return -1;
+		goto free_it;
 	}
 
 	/* Set up the queue */
@@ -663,15 +664,21 @@ out_unlock:
 	write_unlock_bh(&aarp_lock);
 
 	/* Tell the ddp layer we have taken over for this frame. */
-	return 0;
+	goto sent;
 
 sendit:
 	if (skb->sk)
 		skb->priority = skb->sk->sk_priority;
-	dev_queue_xmit(skb);
+	if (dev_queue_xmit(skb))
+		goto drop;
 sent:
-	return 1;
+	return NET_XMIT_SUCCESS;
+free_it:
+	kfree_skb(skb);
+drop:
+	return NET_XMIT_DROP;
 }
+EXPORT_SYMBOL(aarp_send_ddp);
 
 /*
  *	An entry in the aarp unresolved queue has become resolved. Send
@@ -772,87 +779,87 @@ static int aarp_rcv(struct sk_buff *skb, struct net_device *dev,
 	}
 
 	switch (function) {
-		case AARP_REPLY:
-			if (!unresolved_count)	/* Speed up */
-				break;
-
-			/* Find the entry.  */
-			a = __aarp_find_entry(unresolved[hash], dev, &sa);
-			if (!a || dev != a->dev)
-				break;
-
-			/* We can fill one in - this is good. */
-			memcpy(a->hwaddr, ea->hw_src, ETH_ALEN);
-			__aarp_resolved(&unresolved[hash], a, hash);
-			if (!unresolved_count)
-				mod_timer(&aarp_timer,
-					  jiffies + sysctl_aarp_expiry_time);
+	case AARP_REPLY:
+		if (!unresolved_count)	/* Speed up */
 			break;
 
-		case AARP_REQUEST:
-		case AARP_PROBE:
+		/* Find the entry.  */
+		a = __aarp_find_entry(unresolved[hash], dev, &sa);
+		if (!a || dev != a->dev)
+			break;
+
+		/* We can fill one in - this is good. */
+		memcpy(a->hwaddr, ea->hw_src, ETH_ALEN);
+		__aarp_resolved(&unresolved[hash], a, hash);
+		if (!unresolved_count)
+			mod_timer(&aarp_timer,
+				  jiffies + sysctl_aarp_expiry_time);
+		break;
+
+	case AARP_REQUEST:
+	case AARP_PROBE:
+
+		/*
+		 * If it is my address set ma to my address and reply.
+		 * We can treat probe and request the same.  Probe
+		 * simply means we shouldn't cache the querying host,
+		 * as in a probe they are proposing an address not
+		 * using one.
+		 *
+		 * Support for proxy-AARP added. We check if the
+		 * address is one of our proxies before we toss the
+		 * packet out.
+		 */
+
+		sa.s_node = ea->pa_dst_node;
+		sa.s_net  = ea->pa_dst_net;
+
+		/* See if we have a matching proxy. */
+		ma = __aarp_proxy_find(dev, &sa);
+		if (!ma)
+			ma = &ifa->address;
+		else { /* We need to make a copy of the entry. */
+			da.s_node = sa.s_node;
+			da.s_net = sa.s_net;
+			ma = &da;
+		}
+
+		if (function == AARP_PROBE) {
+			/*
+			 * A probe implies someone trying to get an
+			 * address. So as a precaution flush any
+			 * entries we have for this address.
+			 */
+			a = __aarp_find_entry(resolved[sa.s_node %
+						       (AARP_HASH_SIZE - 1)],
+					      skb->dev, &sa);
 
 			/*
-			 * If it is my address set ma to my address and reply.
-			 * We can treat probe and request the same.  Probe
-			 * simply means we shouldn't cache the querying host,
-			 * as in a probe they are proposing an address not
-			 * using one.
-			 *
-			 * Support for proxy-AARP added. We check if the
-			 * address is one of our proxies before we toss the
-			 * packet out.
+			 * Make it expire next tick - that avoids us
+			 * getting into a probe/flush/learn/probe/
+			 * flush/learn cycle during probing of a slow
+			 * to respond host addr.
 			 */
-
-			sa.s_node = ea->pa_dst_node;
-			sa.s_net  = ea->pa_dst_net;
-
-			/* See if we have a matching proxy. */
-			ma = __aarp_proxy_find(dev, &sa);
-			if (!ma)
-				ma = &ifa->address;
-			else { /* We need to make a copy of the entry. */
-				da.s_node = sa.s_node;
-				da.s_net = da.s_net;
-				ma = &da;
+			if (a) {
+				a->expires_at = jiffies - 1;
+				mod_timer(&aarp_timer, jiffies +
+					  sysctl_aarp_tick_time);
 			}
+		}
 
-			if (function == AARP_PROBE) {
-				/*
-				 * A probe implies someone trying to get an
-				 * address. So as a precaution flush any
-				 * entries we have for this address.
-				 */
-				a = __aarp_find_entry(resolved[sa.s_node %
-							  (AARP_HASH_SIZE - 1)],
-						      skb->dev, &sa);
-
-				/*
-				 * Make it expire next tick - that avoids us
-				 * getting into a probe/flush/learn/probe/
-				 * flush/learn cycle during probing of a slow
-				 * to respond host addr.
-				 */
-				if (a) {
-					a->expires_at = jiffies - 1;
-					mod_timer(&aarp_timer, jiffies +
-							sysctl_aarp_tick_time);
-				}
-			}
-
-			if (sa.s_node != ma->s_node)
-				break;
-
-			if (sa.s_net && ma->s_net && sa.s_net != ma->s_net)
-				break;
-
-			sa.s_node = ea->pa_src_node;
-			sa.s_net = ea->pa_src_net;
-
-			/* aarp_my_address has found the address to use for us.
-			*/
-			aarp_send_reply(dev, ma, &sa, ea->hw_src);
+		if (sa.s_node != ma->s_node)
 			break;
+
+		if (sa.s_net && ma->s_net && sa.s_net != ma->s_net)
+			break;
+
+		sa.s_node = ea->pa_src_node;
+		sa.s_net = ea->pa_src_net;
+
+		/* aarp_my_address has found the address to use for us.
+		 */
+		aarp_send_reply(dev, ma, &sa, ea->hw_src);
+		break;
 	}
 
 unlock:

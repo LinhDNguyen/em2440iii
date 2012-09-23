@@ -1,6 +1,6 @@
 /************************************************************************
  * s2io.h: A Linux PCI-X Ethernet driver for Neterion 10GbE Server NIC
- * Copyright(c) 2002-2007 Neterion Inc.
+ * Copyright(c) 2002-2010 Exar Corp.
 
  * This software may be used and distributed according to the terms of
  * the GNU General Public License (GPL), incorporated herein by reference.
@@ -17,15 +17,6 @@
 #define s2BIT(loc)		(0x8000000000000000ULL >> (loc))
 #define vBIT(val, loc, sz)	(((u64)val) << (64-loc-sz))
 #define INV(d)  ((d&0xff)<<24) | (((d>>8)&0xff)<<16) | (((d>>16)&0xff)<<8)| ((d>>24)&0xff)
-
-#ifndef BOOL
-#define BOOL    int
-#endif
-
-#ifndef TRUE
-#define TRUE    1
-#define FALSE   0
-#endif
 
 #undef SUCCESS
 #define SUCCESS 0
@@ -73,7 +64,10 @@ enum {
 static int debug_level = ERR_DBG;
 
 /* DEBUG message print. */
-#define DBG_PRINT(dbg_level, args...)  if(!(debug_level<dbg_level)) printk(args)
+#define DBG_PRINT(dbg_level, fmt, args...) do {			\
+	if (dbg_level <= debug_level)				\
+		pr_info(fmt, ##args);				\
+	} while (0)
 
 /* Protocol assist features of the NIC */
 #define L3_CKSUM_OK 0xFFFF
@@ -361,13 +355,12 @@ struct stat_block {
 #define FIFO_OTHER_MAX_NUM			1
 
 
-#define MAX_RX_DESC_1  (MAX_RX_RINGS * MAX_RX_BLOCKS_PER_RING * 127 )
-#define MAX_RX_DESC_2  (MAX_RX_RINGS * MAX_RX_BLOCKS_PER_RING * 85 )
-#define MAX_RX_DESC_3  (MAX_RX_RINGS * MAX_RX_BLOCKS_PER_RING * 85 )
+#define MAX_RX_DESC_1  (MAX_RX_RINGS * MAX_RX_BLOCKS_PER_RING * 128)
+#define MAX_RX_DESC_2  (MAX_RX_RINGS * MAX_RX_BLOCKS_PER_RING * 86)
 #define MAX_TX_DESC    (MAX_AVAILABLE_TXDS)
 
 /* FIFO mappings for all possible number of fifos configured */
-static int fifo_map[][MAX_TX_FIFOS] = {
+static const int fifo_map[][MAX_TX_FIFOS] = {
 	{0, 0, 0, 0, 0, 0, 0, 0},
 	{0, 0, 0, 0, 1, 1, 1, 1},
 	{0, 0, 0, 1, 1, 1, 2, 2},
@@ -378,12 +371,12 @@ static int fifo_map[][MAX_TX_FIFOS] = {
 	{0, 1, 2, 3, 4, 5, 6, 7},
 };
 
-static u16 fifo_selector[MAX_TX_FIFOS] = {0, 1, 3, 3, 7, 7, 7, 7};
+static const u16 fifo_selector[MAX_TX_FIFOS] = {0, 1, 3, 3, 7, 7, 7, 7};
 
 /* Maintains Per FIFO related information. */
 struct tx_fifo_config {
 #define	MAX_AVAILABLE_TXDS	8192
-	u32 fifo_len;		/* specifies len of FIFO upto 8192, ie no of TxDLs */
+	u32 fifo_len;		/* specifies len of FIFO up to 8192, ie no of TxDLs */
 /* Priority definition */
 #define TX_FIFO_PRI_0               0	/*Highest */
 #define TX_FIFO_PRI_1               1
@@ -751,10 +744,6 @@ struct ring_info {
 
 	/* Buffer Address store. */
 	struct buffAdd **ba;
-
-	/* per-Ring statistics */
-	unsigned long rx_packets;
-	unsigned long rx_bytes;
 } ____cacheline_aligned;
 
 /* Fifo specific structure */
@@ -824,12 +813,6 @@ struct mac_info {
 	dma_addr_t stats_mem_phy;	/* Physical address of the stat block */
 	u32 stats_mem_sz;
 	struct stat_block *stats_info;	/* Logical address of the stat block */
-};
-
-/* structure representing the user defined MAC addresses */
-struct usr_addr {
-	char addr[ETH_ALEN];
-	int usage_cnt;
 };
 
 /* Default Tunable parameters of the NIC. */
@@ -904,16 +887,11 @@ struct s2io_nic {
 #define ALL_MULTI   2
 
 #define MAX_ADDRS_SUPPORTED 64
-	u16 usr_addr_count;
 	u16 mc_addr_count;
-	struct usr_addr usr_addrs[256];
 
 	u16 m_cast_flg;
 	u16 all_multi_pos;
 	u16 promisc_flg;
-
-	/*  Id timer, used to blink NIC to physically identify NIC. */
-	struct timer_list id_timer;
 
 	/*  Restart timer, used to restart NIC if the device is stuck and
 	 *  a schedule task that will set the correct Link state once the
@@ -961,7 +939,6 @@ struct s2io_nic {
 
 	int task_flag;
 	unsigned long long start_time;
-	struct vlan_group *vlgrp;
 	int vlan_strip_flag;
 #define MSIX_FLG                0xA5
 	int num_entries;
@@ -981,7 +958,6 @@ struct s2io_nic {
 
 	unsigned long	clubbed_frms_cnt;
 	unsigned long	sending_both;
-	u8		lro;
 	u16		lro_max_aggr_per_sess;
 	volatile unsigned long state;
 	u64		general_int_mask;
@@ -991,8 +967,8 @@ struct s2io_nic {
 	u8  serial_num[VPD_STRING_LEN];
 };
 
-#define RESET_ERROR 1;
-#define CMD_ERROR   2;
+#define RESET_ERROR 1
+#define CMD_ERROR   2
 
 /*  OS related system calls */
 #ifndef readq
@@ -1025,18 +1001,16 @@ static inline void writeq(u64 val, void __iomem *addr)
 #define LF	2
 static inline void SPECIAL_REG_WRITE(u64 val, void __iomem *addr, int order)
 {
-	u32 ret;
-
 	if (order == LF) {
 		writel((u32) (val), addr);
-		ret = readl(addr);
+		(void) readl(addr);
 		writel((u32) (val >> 32), (addr + 4));
-		ret = readl(addr + 4);
+		(void) readl(addr + 4);
 	} else {
 		writel((u32) (val >> 32), (addr + 4));
-		ret = readl(addr + 4);
+		(void) readl(addr + 4);
 		writel((u32) (val), addr);
-		ret = readl(addr);
+		(void) readl(addr);
 	}
 }
 

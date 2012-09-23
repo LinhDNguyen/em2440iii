@@ -4,14 +4,15 @@
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/compiler.h>
+#include <linux/gfp.h>
 
-#define FIRMWARE_NAME_MAX 30 
 #define FW_ACTION_NOHOTPLUG 0
 #define FW_ACTION_HOTPLUG 1
 
 struct firmware {
 	size_t size;
 	const u8 *data;
+	struct page **pages;
 };
 
 struct device;
@@ -38,8 +39,8 @@ struct builtin_fw {
 int request_firmware(const struct firmware **fw, const char *name,
 		     struct device *device);
 int request_firmware_nowait(
-	struct module *module, int uevent,
-	const char *name, struct device *device, void *context,
+	struct module *module, bool uevent,
+	const char *name, struct device *device, gfp_t gfp, void *context,
 	void (*cont)(const struct firmware *fw, void *context));
 
 void release_firmware(const struct firmware *fw);
@@ -51,8 +52,8 @@ static inline int request_firmware(const struct firmware **fw,
 	return -EINVAL;
 }
 static inline int request_firmware_nowait(
-	struct module *module, int uevent,
-	const char *name, struct device *device, void *context,
+	struct module *module, bool uevent,
+	const char *name, struct device *device, gfp_t gfp, void *context,
 	void (*cont)(const struct firmware *fw, void *context))
 {
 	return -EINVAL;

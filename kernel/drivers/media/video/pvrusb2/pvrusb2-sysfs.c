@@ -74,7 +74,7 @@ struct pvr2_sysfs_ctl_item {
 	int ctl_id;
 	struct pvr2_sysfs *chptr;
 	struct pvr2_sysfs_ctl_item *item_next;
-	struct attribute *attr_gen[7];
+	struct attribute *attr_gen[8];
 	struct attribute_group grp;
 	int created_ok;
 	char name[80];
@@ -324,36 +324,45 @@ static void pvr2_sysfs_add_control(struct pvr2_sysfs *sfp,int ctl_id)
 	}
 	sfp->item_last = cip;
 
+	sysfs_attr_init(&cip->attr_name.attr);
 	cip->attr_name.attr.name = "name";
 	cip->attr_name.attr.mode = S_IRUGO;
 	cip->attr_name.show = show_name;
 
+	sysfs_attr_init(&cip->attr_type.attr);
 	cip->attr_type.attr.name = "type";
 	cip->attr_type.attr.mode = S_IRUGO;
 	cip->attr_type.show = show_type;
 
+	sysfs_attr_init(&cip->attr_min.attr);
 	cip->attr_min.attr.name = "min_val";
 	cip->attr_min.attr.mode = S_IRUGO;
 	cip->attr_min.show = show_min;
 
+	sysfs_attr_init(&cip->attr_max.attr);
 	cip->attr_max.attr.name = "max_val";
 	cip->attr_max.attr.mode = S_IRUGO;
 	cip->attr_max.show = show_max;
 
+	sysfs_attr_init(&cip->attr_def.attr);
 	cip->attr_def.attr.name = "def_val";
 	cip->attr_def.attr.mode = S_IRUGO;
 	cip->attr_def.show = show_def;
 
+	sysfs_attr_init(&cip->attr_val.attr);
 	cip->attr_val.attr.name = "cur_val";
 	cip->attr_val.attr.mode = S_IRUGO;
 
+	sysfs_attr_init(&cip->attr_custom.attr);
 	cip->attr_custom.attr.name = "custom_val";
 	cip->attr_custom.attr.mode = S_IRUGO;
 
+	sysfs_attr_init(&cip->attr_enum.attr);
 	cip->attr_enum.attr.name = "enum_val";
 	cip->attr_enum.attr.mode = S_IRUGO;
 	cip->attr_enum.show = show_enum;
 
+	sysfs_attr_init(&cip->attr_bits.attr);
 	cip->attr_bits.attr.name = "bit_val";
 	cip->attr_bits.attr.mode = S_IRUGO;
 	cip->attr_bits.show = show_bits;
@@ -423,10 +432,12 @@ static void pvr2_sysfs_add_debugifc(struct pvr2_sysfs *sfp)
 
 	dip = kzalloc(sizeof(*dip),GFP_KERNEL);
 	if (!dip) return;
+	sysfs_attr_init(&dip->attr_debugcmd.attr);
 	dip->attr_debugcmd.attr.name = "debugcmd";
 	dip->attr_debugcmd.attr.mode = S_IRUGO|S_IWUSR|S_IWGRP;
 	dip->attr_debugcmd.show = debugcmd_show;
 	dip->attr_debugcmd.store = debugcmd_store;
+	sysfs_attr_init(&dip->attr_debuginfo.attr);
 	dip->attr_debuginfo.attr.name = "debuginfo";
 	dip->attr_debuginfo.attr.mode = S_IRUGO;
 	dip->attr_debuginfo.show = debuginfo_show;
@@ -509,6 +520,7 @@ static void pvr2_sysfs_release(struct device *class_dev)
 
 static void class_dev_destroy(struct pvr2_sysfs *sfp)
 {
+	struct device *dev;
 	if (!sfp->class_dev) return;
 #ifdef CONFIG_VIDEO_PVRUSB2_DEBUGIFC
 	pvr2_sysfs_tear_down_debugifc(sfp);
@@ -539,7 +551,10 @@ static void class_dev_destroy(struct pvr2_sysfs *sfp)
 					 &sfp->attr_unit_number);
 	}
 	pvr2_sysfs_trace("Destroying class_dev id=%p",sfp->class_dev);
-	sfp->class_dev->driver_data = NULL;
+	dev_set_drvdata(sfp->class_dev, NULL);
+	dev = sfp->class_dev->parent;
+	sfp->class_dev->parent = NULL;
+	put_device(dev);
 	device_unregister(sfp->class_dev);
 	sfp->class_dev = NULL;
 }
@@ -549,7 +564,7 @@ static ssize_t v4l_minor_number_show(struct device *class_dev,
 				     struct device_attribute *attr, char *buf)
 {
 	struct pvr2_sysfs *sfp;
-	sfp = (struct pvr2_sysfs *)class_dev->driver_data;
+	sfp = dev_get_drvdata(class_dev);
 	if (!sfp) return -EINVAL;
 	return scnprintf(buf,PAGE_SIZE,"%d\n",
 			 pvr2_hdw_v4l_get_minor_number(sfp->channel.hdw,
@@ -561,7 +576,7 @@ static ssize_t bus_info_show(struct device *class_dev,
 			     struct device_attribute *attr, char *buf)
 {
 	struct pvr2_sysfs *sfp;
-	sfp = (struct pvr2_sysfs *)class_dev->driver_data;
+	sfp = dev_get_drvdata(class_dev);
 	if (!sfp) return -EINVAL;
 	return scnprintf(buf,PAGE_SIZE,"%s\n",
 			 pvr2_hdw_get_bus_info(sfp->channel.hdw));
@@ -572,7 +587,7 @@ static ssize_t hdw_name_show(struct device *class_dev,
 			     struct device_attribute *attr, char *buf)
 {
 	struct pvr2_sysfs *sfp;
-	sfp = (struct pvr2_sysfs *)class_dev->driver_data;
+	sfp = dev_get_drvdata(class_dev);
 	if (!sfp) return -EINVAL;
 	return scnprintf(buf,PAGE_SIZE,"%s\n",
 			 pvr2_hdw_get_type(sfp->channel.hdw));
@@ -583,7 +598,7 @@ static ssize_t hdw_desc_show(struct device *class_dev,
 			     struct device_attribute *attr, char *buf)
 {
 	struct pvr2_sysfs *sfp;
-	sfp = (struct pvr2_sysfs *)class_dev->driver_data;
+	sfp = dev_get_drvdata(class_dev);
 	if (!sfp) return -EINVAL;
 	return scnprintf(buf,PAGE_SIZE,"%s\n",
 			 pvr2_hdw_get_desc(sfp->channel.hdw));
@@ -595,7 +610,7 @@ static ssize_t v4l_radio_minor_number_show(struct device *class_dev,
 					   char *buf)
 {
 	struct pvr2_sysfs *sfp;
-	sfp = (struct pvr2_sysfs *)class_dev->driver_data;
+	sfp = dev_get_drvdata(class_dev);
 	if (!sfp) return -EINVAL;
 	return scnprintf(buf,PAGE_SIZE,"%d\n",
 			 pvr2_hdw_v4l_get_minor_number(sfp->channel.hdw,
@@ -607,7 +622,7 @@ static ssize_t unit_number_show(struct device *class_dev,
 				struct device_attribute *attr, char *buf)
 {
 	struct pvr2_sysfs *sfp;
-	sfp = (struct pvr2_sysfs *)class_dev->driver_data;
+	sfp = dev_get_drvdata(class_dev);
 	if (!sfp) return -EINVAL;
 	return scnprintf(buf,PAGE_SIZE,"%d\n",
 			 pvr2_hdw_get_unit_number(sfp->channel.hdw));
@@ -629,21 +644,23 @@ static void class_dev_create(struct pvr2_sysfs *sfp,
 	pvr2_sysfs_trace("Creating class_dev id=%p",class_dev);
 
 	class_dev->class = &class_ptr->class;
+
 	dev_set_name(class_dev, "%s",
 		     pvr2_hdw_get_device_identifier(sfp->channel.hdw));
 
-	class_dev->parent = &usb_dev->dev;
+	class_dev->parent = get_device(&usb_dev->dev);
 
 	sfp->class_dev = class_dev;
-	class_dev->driver_data = sfp;
+	dev_set_drvdata(class_dev, sfp);
 	ret = device_register(class_dev);
 	if (ret) {
 		pvr2_trace(PVR2_TRACE_ERROR_LEGS,
 			   "device_register failed");
-		kfree(class_dev);
+		put_device(class_dev);
 		return;
 	}
 
+	sysfs_attr_init(&sfp->attr_v4l_minor_number.attr);
 	sfp->attr_v4l_minor_number.attr.name = "v4l_minor_number";
 	sfp->attr_v4l_minor_number.attr.mode = S_IRUGO;
 	sfp->attr_v4l_minor_number.show = v4l_minor_number_show;
@@ -658,6 +675,7 @@ static void class_dev_create(struct pvr2_sysfs *sfp,
 		sfp->v4l_minor_number_created_ok = !0;
 	}
 
+	sysfs_attr_init(&sfp->attr_v4l_radio_minor_number.attr);
 	sfp->attr_v4l_radio_minor_number.attr.name = "v4l_radio_minor_number";
 	sfp->attr_v4l_radio_minor_number.attr.mode = S_IRUGO;
 	sfp->attr_v4l_radio_minor_number.show = v4l_radio_minor_number_show;
@@ -672,6 +690,7 @@ static void class_dev_create(struct pvr2_sysfs *sfp,
 		sfp->v4l_radio_minor_number_created_ok = !0;
 	}
 
+	sysfs_attr_init(&sfp->attr_unit_number.attr);
 	sfp->attr_unit_number.attr.name = "unit_number";
 	sfp->attr_unit_number.attr.mode = S_IRUGO;
 	sfp->attr_unit_number.show = unit_number_show;
@@ -685,6 +704,7 @@ static void class_dev_create(struct pvr2_sysfs *sfp,
 		sfp->unit_number_created_ok = !0;
 	}
 
+	sysfs_attr_init(&sfp->attr_bus_info.attr);
 	sfp->attr_bus_info.attr.name = "bus_info_str";
 	sfp->attr_bus_info.attr.mode = S_IRUGO;
 	sfp->attr_bus_info.show = bus_info_show;
@@ -699,6 +719,7 @@ static void class_dev_create(struct pvr2_sysfs *sfp,
 		sfp->bus_info_created_ok = !0;
 	}
 
+	sysfs_attr_init(&sfp->attr_hdw_name.attr);
 	sfp->attr_hdw_name.attr.name = "device_hardware_type";
 	sfp->attr_hdw_name.attr.mode = S_IRUGO;
 	sfp->attr_hdw_name.show = hdw_name_show;
@@ -713,6 +734,7 @@ static void class_dev_create(struct pvr2_sysfs *sfp,
 		sfp->hdw_name_created_ok = !0;
 	}
 
+	sysfs_attr_init(&sfp->attr_hdw_desc.attr);
 	sfp->attr_hdw_desc.attr.name = "device_hardware_description";
 	sfp->attr_hdw_desc.attr.mode = S_IRUGO;
 	sfp->attr_hdw_desc.show = hdw_desc_show;
@@ -767,7 +789,8 @@ struct pvr2_sysfs_class *pvr2_sysfs_class_create(void)
 	struct pvr2_sysfs_class *clp;
 	clp = kzalloc(sizeof(*clp),GFP_KERNEL);
 	if (!clp) return clp;
-	pvr2_sysfs_trace("Creating pvr2_sysfs_class id=%p",clp);
+	pvr2_sysfs_trace("Creating and registering pvr2_sysfs_class id=%p",
+			 clp);
 	clp->class.name = "pvrusb2";
 	clp->class.class_release = pvr2_sysfs_class_release;
 	clp->class.dev_release = pvr2_sysfs_release;
@@ -783,6 +806,7 @@ struct pvr2_sysfs_class *pvr2_sysfs_class_create(void)
 
 void pvr2_sysfs_class_destroy(struct pvr2_sysfs_class *clp)
 {
+	pvr2_sysfs_trace("Unregistering pvr2_sysfs_class id=%p", clp);
 	class_unregister(&clp->class);
 }
 
@@ -792,7 +816,7 @@ static ssize_t debuginfo_show(struct device *class_dev,
 			      struct device_attribute *attr, char *buf)
 {
 	struct pvr2_sysfs *sfp;
-	sfp = (struct pvr2_sysfs *)class_dev->driver_data;
+	sfp = dev_get_drvdata(class_dev);
 	if (!sfp) return -EINVAL;
 	pvr2_hdw_trigger_module_log(sfp->channel.hdw);
 	return pvr2_debugifc_print_info(sfp->channel.hdw,buf,PAGE_SIZE);
@@ -803,7 +827,7 @@ static ssize_t debugcmd_show(struct device *class_dev,
 			     struct device_attribute *attr, char *buf)
 {
 	struct pvr2_sysfs *sfp;
-	sfp = (struct pvr2_sysfs *)class_dev->driver_data;
+	sfp = dev_get_drvdata(class_dev);
 	if (!sfp) return -EINVAL;
 	return pvr2_debugifc_print_status(sfp->channel.hdw,buf,PAGE_SIZE);
 }
@@ -816,7 +840,7 @@ static ssize_t debugcmd_store(struct device *class_dev,
 	struct pvr2_sysfs *sfp;
 	int ret;
 
-	sfp = (struct pvr2_sysfs *)class_dev->driver_data;
+	sfp = dev_get_drvdata(class_dev);
 	if (!sfp) return -EINVAL;
 
 	ret = pvr2_debugifc_docmd(sfp->channel.hdw,buf,count);

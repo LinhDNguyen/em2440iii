@@ -18,7 +18,7 @@
                 to specify the offset instead of the absolute address
 
   NOTE:
-  With slram it's only possible to map a contigous memory region. Therfore
+  With slram it's only possible to map a contiguous memory region. Therefore
   if there's a device mapped somewhere in the region specified slram will
   fail to load (see kernel log if modprobe fails).
 
@@ -210,7 +210,7 @@ static int register_device(char *name, unsigned long start, unsigned long length
 	(*curmtd)->mtdinfo->erasesize = SLRAM_BLK_SZ;
 	(*curmtd)->mtdinfo->writesize = 1;
 
-	if (add_mtd_device((*curmtd)->mtdinfo))	{
+	if (mtd_device_register((*curmtd)->mtdinfo, NULL, 0))	{
 		E("slram: Failed to register new device\n");
 		iounmap(((slram_priv_t *)(*curmtd)->mtdinfo->priv)->start);
 		kfree((*curmtd)->mtdinfo->priv);
@@ -231,7 +231,7 @@ static void unregister_devices(void)
 
 	while (slram_mtdlist) {
 		nextitem = slram_mtdlist->next;
-		del_mtd_device(slram_mtdlist->mtdinfo);
+		mtd_device_unregister(slram_mtdlist->mtdinfo);
 		iounmap(((slram_priv_t *)slram_mtdlist->mtdinfo->priv)->start);
 		kfree(slram_mtdlist->mtdinfo->priv);
 		kfree(slram_mtdlist->mtdinfo);
@@ -303,7 +303,7 @@ __setup("slram=", mtd_slram_setup);
 
 #endif
 
-static int init_slram(void)
+static int __init init_slram(void)
 {
 	char *devname;
 	int i;
@@ -341,7 +341,7 @@ static int init_slram(void)
 #else
 	int count;
 
-	for (count = 0; (map[count]) && (count < SLRAM_MAX_DEVICES_PARAMS);
+	for (count = 0; count < SLRAM_MAX_DEVICES_PARAMS && map[count];
 			count++) {
 	}
 

@@ -10,13 +10,14 @@
 #ifndef OPROFILE_STATS_H
 #define OPROFILE_STATS_H
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 struct oprofile_stat_struct {
 	atomic_t sample_lost_no_mm;
 	atomic_t sample_lost_no_mapping;
 	atomic_t bt_lost_no_mapping;
 	atomic_t event_lost_overflow;
+	atomic_t multiplex_counter;
 };
 
 extern struct oprofile_stat_struct oprofile_stats;

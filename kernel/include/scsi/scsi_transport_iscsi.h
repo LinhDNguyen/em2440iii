@@ -32,6 +32,7 @@ struct scsi_transport_template;
 struct iscsi_transport;
 struct iscsi_endpoint;
 struct Scsi_Host;
+struct scsi_cmnd;
 struct iscsi_cls_conn;
 struct iscsi_conn;
 struct iscsi_task;
@@ -100,6 +101,8 @@ struct iscsi_transport {
 	void (*destroy_conn) (struct iscsi_cls_conn *conn);
 	int (*set_param) (struct iscsi_cls_conn *conn, enum iscsi_param param,
 			  char *buf, int buflen);
+	int (*get_ep_param) (struct iscsi_endpoint *ep, enum iscsi_param param,
+			     char *buf);
 	int (*get_conn_param) (struct iscsi_cls_conn *conn,
 			       enum iscsi_param param, char *buf);
 	int (*get_session_param) (struct iscsi_cls_session *session,
@@ -126,12 +129,14 @@ struct iscsi_transport {
 			       int *index, int *age);
 
 	void (*session_recovery_timedout) (struct iscsi_cls_session *session);
-	struct iscsi_endpoint *(*ep_connect) (struct sockaddr *dst_addr,
+	struct iscsi_endpoint *(*ep_connect) (struct Scsi_Host *shost,
+					      struct sockaddr *dst_addr,
 					      int non_blocking);
 	int (*ep_poll) (struct iscsi_endpoint *ep, int timeout_ms);
 	void (*ep_disconnect) (struct iscsi_endpoint *ep);
 	int (*tgt_dscvr) (struct Scsi_Host *shost, enum iscsi_tgt_dscvr type,
 			  uint32_t enable, struct sockaddr *dst_addr);
+	int (*set_path) (struct Scsi_Host *shost, struct iscsi_path *params);
 };
 
 /*
@@ -148,13 +153,18 @@ extern void iscsi_conn_error_event(struct iscsi_cls_conn *conn,
 extern int iscsi_recv_pdu(struct iscsi_cls_conn *conn, struct iscsi_hdr *hdr,
 			  char *data, uint32_t data_size);
 
+extern int iscsi_offload_mesg(struct Scsi_Host *shost,
+			      struct iscsi_transport *transport, uint32_t type,
+			      char *data, uint16_t data_size);
+
 struct iscsi_cls_conn {
 	struct list_head conn_list;	/* item in connlist */
 	void *dd_data;			/* LLD private data */
 	struct iscsi_transport *transport;
 	uint32_t cid;			/* connection id */
+	struct mutex ep_mutex;
+	struct iscsi_endpoint *ep;
 
-	int active;			/* must be accessed with the connlock */
 	struct device dev;		/* sysfs transport/container device */
 };
 
@@ -215,6 +225,7 @@ struct iscsi_endpoint {
 	void *dd_data;			/* LLD private data */
 	struct device dev;
 	uint64_t id;
+	struct iscsi_cls_conn *conn;
 };
 
 /*
@@ -249,5 +260,6 @@ extern int iscsi_scan_finished(struct Scsi_Host *shost, unsigned long time);
 extern struct iscsi_endpoint *iscsi_create_endpoint(int dd_size);
 extern void iscsi_destroy_endpoint(struct iscsi_endpoint *ep);
 extern struct iscsi_endpoint *iscsi_lookup_endpoint(u64 handle);
+extern int iscsi_block_scsi_eh(struct scsi_cmnd *cmd);
 
 #endif

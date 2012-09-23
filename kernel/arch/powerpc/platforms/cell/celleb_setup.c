@@ -80,8 +80,7 @@ static void celleb_show_cpuinfo(struct seq_file *m)
 
 static int __init celleb_machine_type_hack(char *ptr)
 {
-	strncpy(celleb_machine_type, ptr, sizeof(celleb_machine_type));
-	celleb_machine_type[sizeof(celleb_machine_type)-1] = 0;
+	strlcpy(celleb_machine_type, ptr, sizeof(celleb_machine_type));
 	return 0;
 }
 
@@ -127,10 +126,6 @@ static void __init celleb_setup_arch_beat(void)
 #ifdef CONFIG_SPU_BASE
 	spu_priv1_ops		= &spu_priv1_beat_ops;
 	spu_management_ops	= &spu_management_of_ops;
-#endif
-
-#ifdef CONFIG_SMP
-	smp_init_celleb();
 #endif
 
 	celleb_setup_arch_common();

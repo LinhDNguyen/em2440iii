@@ -16,6 +16,7 @@
  */
 
 #include <linux/mISDNif.h>
+#include <linux/slab.h>
 #include "core.h"
 #include "fsm.h"
 #include "layer2.h"
@@ -94,14 +95,20 @@ static void
 l2m_debug(struct FsmInst *fi, char *fmt, ...)
 {
 	struct layer2 *l2 = fi->userdata;
+	struct va_format vaf;
 	va_list va;
 
 	if (!(*debug & DEBUG_L2_FSM))
 		return;
+
 	va_start(va, fmt);
-	printk(KERN_DEBUG "l2 (tei %d): ", l2->tei);
-	vprintk(fmt, va);
-	printk("\n");
+
+	vaf.fmt = fmt;
+	vaf.va = &va;
+
+	printk(KERN_DEBUG "l2 (sapi %d tei %d): %pV\n",
+	       l2->sapi, l2->tei, &vaf);
+
 	va_end(va);
 }
 
@@ -1633,7 +1640,7 @@ l2_tei_remove(struct FsmInst *fi, int event, void *arg)
 }
 
 static void
-l2_st14_persistant_da(struct FsmInst *fi, int event, void *arg)
+l2_st14_persistent_da(struct FsmInst *fi, int event, void *arg)
 {
 	struct layer2 *l2 = fi->userdata;
 	struct sk_buff *skb = arg;
@@ -1647,7 +1654,7 @@ l2_st14_persistant_da(struct FsmInst *fi, int event, void *arg)
 }
 
 static void
-l2_st5_persistant_da(struct FsmInst *fi, int event, void *arg)
+l2_st5_persistent_da(struct FsmInst *fi, int event, void *arg)
 {
 	struct layer2 *l2 = fi->userdata;
 	struct sk_buff *skb = arg;
@@ -1664,7 +1671,7 @@ l2_st5_persistant_da(struct FsmInst *fi, int event, void *arg)
 }
 
 static void
-l2_st6_persistant_da(struct FsmInst *fi, int event, void *arg)
+l2_st6_persistent_da(struct FsmInst *fi, int event, void *arg)
 {
 	struct layer2 *l2 = fi->userdata;
 	struct sk_buff *skb = arg;
@@ -1678,7 +1685,7 @@ l2_st6_persistant_da(struct FsmInst *fi, int event, void *arg)
 }
 
 static void
-l2_persistant_da(struct FsmInst *fi, int event, void *arg)
+l2_persistent_da(struct FsmInst *fi, int event, void *arg)
 {
 	struct layer2 *l2 = fi->userdata;
 	struct sk_buff *skb = arg;
@@ -1822,17 +1829,15 @@ static struct FsmNode L2FnList[] =
 	{ST_L2_6, EV_L2_FRAME_ERROR, l2_frame_error},
 	{ST_L2_7, EV_L2_FRAME_ERROR, l2_frame_error_reest},
 	{ST_L2_8, EV_L2_FRAME_ERROR, l2_frame_error_reest},
-	{ST_L2_1, EV_L1_DEACTIVATE, l2_st14_persistant_da},
+	{ST_L2_1, EV_L1_DEACTIVATE, l2_st14_persistent_da},
 	{ST_L2_2, EV_L1_DEACTIVATE, l2_st24_tei_remove},
 	{ST_L2_3, EV_L1_DEACTIVATE, l2_st3_tei_remove},
-	{ST_L2_4, EV_L1_DEACTIVATE, l2_st14_persistant_da},
-	{ST_L2_5, EV_L1_DEACTIVATE, l2_st5_persistant_da},
-	{ST_L2_6, EV_L1_DEACTIVATE, l2_st6_persistant_da},
-	{ST_L2_7, EV_L1_DEACTIVATE, l2_persistant_da},
-	{ST_L2_8, EV_L1_DEACTIVATE, l2_persistant_da},
+	{ST_L2_4, EV_L1_DEACTIVATE, l2_st14_persistent_da},
+	{ST_L2_5, EV_L1_DEACTIVATE, l2_st5_persistent_da},
+	{ST_L2_6, EV_L1_DEACTIVATE, l2_st6_persistent_da},
+	{ST_L2_7, EV_L1_DEACTIVATE, l2_persistent_da},
+	{ST_L2_8, EV_L1_DEACTIVATE, l2_persistent_da},
 };
-
-#define L2_FN_COUNT (sizeof(L2FnList)/sizeof(struct FsmNode))
 
 static int
 ph_data_indication(struct layer2 *l2, struct mISDNhead *hh, struct sk_buff *skb)
@@ -1859,20 +1864,18 @@ ph_data_indication(struct layer2 *l2, struct mISDNhead *hh, struct sk_buff *skb)
 		psapi >>= 2;
 		ptei >>= 1;
 		if (psapi != l2->sapi) {
-			/* not our bussiness
-			 * printk(KERN_DEBUG "%s: sapi %d/%d sapi mismatch\n",
-			 *  __func__,
-			 *	psapi, l2->sapi);
-			 */
+			/* not our business */
+			if (*debug & DEBUG_L2)
+				printk(KERN_DEBUG "%s: sapi %d/%d mismatch\n",
+					__func__, psapi, l2->sapi);
 			dev_kfree_skb(skb);
 			return 0;
 		}
 		if ((ptei != l2->tei) && (ptei != GROUP_TEI)) {
-			/* not our bussiness
-			 * printk(KERN_DEBUG "%s: tei %d/%d sapi %d mismatch\n",
-			 *  __func__,
-			 *	ptei, l2->tei, psapi);
-			 */
+			/* not our business */
+			if (*debug & DEBUG_L2)
+				printk(KERN_DEBUG "%s: tei %d/%d mismatch\n",
+					__func__, ptei, l2->tei);
 			dev_kfree_skb(skb);
 			return 0;
 		}
@@ -1927,8 +1930,8 @@ l2_send(struct mISDNchannel *ch, struct sk_buff *skb)
 	int 			ret = -EINVAL;
 
 	if (*debug & DEBUG_L2_RECV)
-		printk(KERN_DEBUG "%s: prim(%x) id(%x) tei(%d)\n",
-		    __func__, hh->prim, hh->id, l2->tei);
+		printk(KERN_DEBUG "%s: prim(%x) id(%x) sapi(%d) tei(%d)\n",
+		    __func__, hh->prim, hh->id, l2->sapi, l2->tei);
 	switch (hh->prim) {
 	case PH_DATA_IND:
 		ret = ph_data_indication(l2, hh, skb);
@@ -2068,7 +2071,8 @@ l2_ctrl(struct mISDNchannel *ch, u_int cmd, void *arg)
 }
 
 struct layer2 *
-create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, u_long arg)
+create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, int tei,
+		int sapi)
 {
 	struct layer2		*l2;
 	struct channel_req	rq;
@@ -2089,7 +2093,7 @@ create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, u_long arg)
 		test_and_set_bit(FLG_LAPD, &l2->flag);
 		test_and_set_bit(FLG_LAPD_NET, &l2->flag);
 		test_and_set_bit(FLG_MOD128, &l2->flag);
-		l2->sapi = 0;
+		l2->sapi = sapi;
 		l2->maxlen = MAX_DFRAME_LEN;
 		if (test_bit(OPTION_L2_PMX, &options))
 			l2->window = 7;
@@ -2099,7 +2103,7 @@ create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, u_long arg)
 			test_and_set_bit(FLG_PTP, &l2->flag);
 		if (test_bit(OPTION_L2_FIXEDTEI, &options))
 			test_and_set_bit(FLG_FIXED_TEI, &l2->flag);
-		l2->tei = (u_int)arg;
+		l2->tei = tei;
 		l2->T200 = 1000;
 		l2->N200 = 3;
 		l2->T203 = 10000;
@@ -2114,7 +2118,7 @@ create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, u_long arg)
 		test_and_set_bit(FLG_LAPD, &l2->flag);
 		test_and_set_bit(FLG_MOD128, &l2->flag);
 		test_and_set_bit(FLG_ORIG, &l2->flag);
-		l2->sapi = 0;
+		l2->sapi = sapi;
 		l2->maxlen = MAX_DFRAME_LEN;
 		if (test_bit(OPTION_L2_PMX, &options))
 			l2->window = 7;
@@ -2124,7 +2128,7 @@ create_l2(struct mISDNchannel *ch, u_int protocol, u_long options, u_long arg)
 			test_and_set_bit(FLG_PTP, &l2->flag);
 		if (test_bit(OPTION_L2_FIXEDTEI, &options))
 			test_and_set_bit(FLG_FIXED_TEI, &l2->flag);
-		l2->tei = (u_int)arg;
+		l2->tei = tei;
 		l2->T200 = 1000;
 		l2->N200 = 3;
 		l2->T203 = 10000;
@@ -2180,7 +2184,7 @@ x75create(struct channel_req *crq)
 
 	if (crq->protocol != ISDN_P_B_X75SLP)
 		return -EPROTONOSUPPORT;
-	l2 = create_l2(crq->ch, crq->protocol, 0, 0);
+	l2 = create_l2(crq->ch, crq->protocol, 0, 0, 0);
 	if (!l2)
 		return -ENOMEM;
 	crq->ch = &l2->ch;

@@ -9,7 +9,6 @@ struct multipath_private_data {
 	mddev_t			*mddev;
 	struct multipath_info	*multipaths;
 	int			raid_disks;
-	int			working_disks;
 	spinlock_t		device_lock;
 	struct list_head	retry_list;
 
@@ -17,12 +16,6 @@ struct multipath_private_data {
 };
 
 typedef struct multipath_private_data multipath_conf_t;
-
-/*
- * this is the only point in the RAID code where we violate
- * C type safety. mddev->private is an 'opaque' pointer.
- */
-#define mddev_to_conf(mddev) ((multipath_conf_t *) mddev->private)
 
 /*
  * this is our 'private' 'collective' MULTIPATH buffer head.

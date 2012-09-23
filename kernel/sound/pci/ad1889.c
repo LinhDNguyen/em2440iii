@@ -29,7 +29,7 @@
  *	PM support
  *	MIDI support
  *	Game Port support
- *	SG DMA support (this will need *alot* of work)
+ *	SG DMA support (this will need *a lot* of work)
  */
 
 #include <linux/init.h>
@@ -909,8 +909,8 @@ snd_ad1889_create(struct snd_card *card,
 		return err;
 
 	/* check PCI availability (32bit DMA) */
-	if (pci_set_dma_mask(pci, DMA_32BIT_MASK) < 0 ||
-	    pci_set_consistent_dma_mask(pci, DMA_32BIT_MASK) < 0) {
+	if (pci_set_dma_mask(pci, DMA_BIT_MASK(32)) < 0 ||
+	    pci_set_consistent_dma_mask(pci, DMA_BIT_MASK(32)) < 0) {
 		printk(KERN_ERR PFX "error setting 32-bit DMA mask.\n");
 		pci_disable_device(pci);
 		return -ENXIO;
@@ -944,7 +944,7 @@ snd_ad1889_create(struct snd_card *card,
 	spin_lock_init(&chip->lock);	/* only now can we call ad1889_free */
 
 	if (request_irq(pci->irq, snd_ad1889_interrupt,
-			IRQF_SHARED, card->driver, chip)) {
+			IRQF_SHARED, KBUILD_MODNAME, chip)) {
 		printk(KERN_ERR PFX "cannot obtain IRQ %d\n", pci->irq);
 		snd_ad1889_free(chip);
 		return -EBUSY;
@@ -995,10 +995,10 @@ snd_ad1889_probe(struct pci_dev *pci,
 	}
 
 	/* (2) */
-	card = snd_card_new(index[devno], id[devno], THIS_MODULE, 0);
+	err = snd_card_create(index[devno], id[devno], THIS_MODULE, 0, &card);
 	/* XXX REVISIT: we can probably allocate chip in this call */
-	if (card == NULL)
-		return -ENOMEM;
+	if (err < 0)
+		return err;
 
 	strcpy(card->driver, "AD1889");
 	strcpy(card->shortname, "Analog Devices AD1889");
@@ -1048,14 +1048,14 @@ snd_ad1889_remove(struct pci_dev *pci)
 	pci_set_drvdata(pci, NULL);
 }
 
-static struct pci_device_id snd_ad1889_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_ad1889_ids) = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_ANALOG_DEVICES, PCI_DEVICE_ID_AD1889JS) },
 	{ 0, },
 };
 MODULE_DEVICE_TABLE(pci, snd_ad1889_ids);
 
 static struct pci_driver ad1889_pci_driver = {
-	.name = "AD1889 Audio",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_ad1889_ids,
 	.probe = snd_ad1889_probe,
 	.remove = __devexit_p(snd_ad1889_remove),

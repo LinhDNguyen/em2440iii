@@ -25,15 +25,16 @@
  */
 
 #include <linux/linkage.h>
+#include <linux/init.h>
 #include <asm/pgtable_types.h>
 #include <asm/page_types.h>
 #include <asm/msr.h>
 #include <asm/segment.h>
 #include <asm/processor-flags.h>
 
-.section .rodata, "a", @progbits
-
-.code16
+	.section ".x86_trampoline","a"
+	.balign PAGE_SIZE
+	.code16
 
 ENTRY(trampoline_data)
 r_base = .
@@ -45,7 +46,7 @@ r_base = .
 	mov	%ax, %ss
 
 
-	movl	$0xA5A5A5A5, trampoline_data - r_base
+	movl	$0xA5A5A5A5, trampoline_status - r_base
 				# write marker for master knows we're running
 
 					# Setup stack
@@ -59,10 +60,13 @@ r_base = .
 	movzx	%ax, %esi		# Find the 32bit trampoline location
 	shll	$4, %esi
 
-					# Fixup the vectors
-	addl	%esi, startup_32_vector - r_base
-	addl	%esi, startup_64_vector - r_base
-	addl	%esi, tgdt + 2 - r_base	# Fixup the gdt pointer
+					# Fixup the absolute vectors
+	leal	(startup_32 - r_base)(%esi), %eax
+	movl	%eax, startup_32_vector - r_base
+	leal	(startup_64 - r_base)(%esi), %eax
+	movl	%eax, startup_64_vector - r_base
+	leal	(tgdt - r_base)(%esi), %eax
+	movl	%eax, (tgdt + 2 - r_base)
 
 	/*
 	 * GDT tables in non default location kernel can be beyond 16MB and
@@ -122,8 +126,9 @@ startup_64:
 no_longmode:
 	hlt
 	jmp no_longmode
-#include "verify_cpu_64.S"
+#include "verify_cpu.S"
 
+	.balign 4
 	# Careful these need to be in the same 64K segment as the above;
 tidt:
 	.word	0			# idt limit = 0
@@ -150,6 +155,10 @@ startup_32_vector:
 startup_64_vector:
 	.long	startup_64 - r_base
 	.word	__KERNEL_CS, 0
+
+	.balign 4
+ENTRY(trampoline_status)
+	.long	0
 
 trampoline_stack:
 	.org 0x1000

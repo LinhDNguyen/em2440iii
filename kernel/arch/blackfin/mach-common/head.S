@@ -3,8 +3,6 @@
  *
  * Copyright 2004-2008 Analog Devices Inc.
  *
- * Enter bugs at http://blackfin.uclinux.org/
- *
  * Licensed under the GPL-2 or later.
  */
 
@@ -30,11 +28,10 @@ ENTRY(__init_clear_bss)
 	rts;
 ENDPROC(__init_clear_bss)
 
-#define INITIAL_STACK	(L1_SCRATCH_START + L1_SCRATCH_LENGTH - 12)
-
 ENTRY(__start)
 	/* R0: argument of command line string, passed from uboot, save it */
 	R7 = R0;
+
 	/* Enable Cycle Counter and Nesting Of Interrupts */
 #ifdef CONFIG_BFIN_SCRATCH_REG_CYCLES
 	R0 = SYSCFG_SNEN;
@@ -42,122 +39,85 @@ ENTRY(__start)
 	R0 = SYSCFG_SNEN | SYSCFG_CCEN;
 #endif
 	SYSCFG = R0;
-	R0 = 0;
 
-	/* Clear Out All the data and pointer Registers */
-	R1 = R0;
-	R2 = R0;
-	R3 = R0;
-	R4 = R0;
-	R5 = R0;
-	R6 = R0;
+	/* Optimization register tricks: keep a base value in the
+	 * reserved P registers so we use the load/store with an
+	 * offset syntax.  R0 = [P5 + <constant>];
+	 *   P5 - core MMR base
+	 *   R6 - 0
+	 */
+	r6 = 0;
+	p5.l = 0;
+	p5.h = hi(COREMMR_BASE);
 
-	P0 = R0;
-	P1 = R0;
-	P2 = R0;
-	P3 = R0;
-	P4 = R0;
-	P5 = R0;
+	/* Zero out registers required by Blackfin ABI */
 
-	LC0 = r0;
-	LC1 = r0;
-	L0 = r0;
-	L1 = r0;
-	L2 = r0;
-	L3 = r0;
+	/* Disable circular buffers */
+	L0 = r6;
+	L1 = r6;
+	L2 = r6;
+	L3 = r6;
 
-	/* Clear Out All the DAG Registers */
-	B0 = r0;
-	B1 = r0;
-	B2 = r0;
-	B3 = r0;
-
-	I0 = r0;
-	I1 = r0;
-	I2 = r0;
-	I3 = r0;
-
-	M0 = r0;
-	M1 = r0;
-	M2 = r0;
-	M3 = r0;
+	/* Disable hardware loops in case we were started by 'go' */
+	LC0 = r6;
+	LC1 = r6;
 
 	/*
 	 * Clear ITEST_COMMAND and DTEST_COMMAND registers,
 	 * Leaving these as non-zero can confuse the emulator
 	 */
-	p0.L = LO(DTEST_COMMAND);
-	p0.H = HI(DTEST_COMMAND);
-	[p0] = R0;
-	[p0 + (ITEST_COMMAND - DTEST_COMMAND)] = R0;
+	[p5 + (DTEST_COMMAND - COREMMR_BASE)] = r6;
+	[p5 + (ITEST_COMMAND - COREMMR_BASE)] = r6;
 	CSYNC;
 
 	trace_buffer_init(p0,r0);
-	P0 = R1;
-	R0 = R1;
 
 	/* Turn off the icache */
-	p0.l = LO(IMEM_CONTROL);
-	p0.h = HI(IMEM_CONTROL);
-	R1 = [p0];
-	R0 = ~ENICPLB;
-	R0 = R0 & R1;
-	[p0] = R0;
+	r1 = [p5 + (IMEM_CONTROL - COREMMR_BASE)];
+	BITCLR (r1, ENICPLB_P);
+	[p5 + (IMEM_CONTROL - COREMMR_BASE)] = r1;
 	SSYNC;
 
 	/* Turn off the dcache */
-	p0.l = LO(DMEM_CONTROL);
-	p0.h = HI(DMEM_CONTROL);
-	R1 = [p0];
-	R0 = ~ENDCPLB;
-	R0 = R0 & R1;
-	[p0] = R0;
+	r1 = [p5 + (DMEM_CONTROL - COREMMR_BASE)];
+	BITCLR (r1, ENDCPLB_P);
+	[p5 + (DMEM_CONTROL - COREMMR_BASE)] = r1;
 	SSYNC;
 
 	/* in case of double faults, save a few things */
-	p0.l = _init_retx;
-	p0.h = _init_retx;
-	R0 = RETX;
-	[P0] = R0;
-
+	p1.l = _initial_pda;
+	p1.h = _initial_pda;
+	r4 = RETX;
 #ifdef CONFIG_DEBUG_DOUBLEFAULT
 	/* Only save these if we are storing them,
 	 * This happens here, since L1 gets clobbered
 	 * below
 	 */
 	GET_PDA(p0, r0);
-	r6 = [p0 + PDA_RETX];
-	p1.l = _init_saved_retx;
-	p1.h = _init_saved_retx;
-	[p1] = r6;
-
-	r6 = [p0 + PDA_DCPLB];
-	p1.l = _init_saved_dcplb_fault_addr;
-	p1.h = _init_saved_dcplb_fault_addr;
-	[p1] = r6;
-
-	r6 = [p0 + PDA_ICPLB];
-	p1.l = _init_saved_icplb_fault_addr;
-	p1.h = _init_saved_icplb_fault_addr;
-	[p1] = r6;
-
-	r6 = [p0 + PDA_SEQSTAT];
-	p1.l = _init_saved_seqstat;
-	p1.h = _init_saved_seqstat;
-	[p1] = r6;
+	r0 = [p0 + PDA_DF_RETX];
+	r1 = [p0 + PDA_DF_DCPLB];
+	r2 = [p0 + PDA_DF_ICPLB];
+	r3 = [p0 + PDA_DF_SEQSTAT];
+	[p1 + PDA_INIT_DF_RETX] = r0;
+	[p1 + PDA_INIT_DF_DCPLB] = r1;
+	[p1 + PDA_INIT_DF_ICPLB] = r2;
+	[p1 + PDA_INIT_DF_SEQSTAT] = r3;
 #endif
+	[p1 + PDA_INIT_RETX] = r4;
 
 	/* Initialize stack pointer */
-	sp.l = lo(INITIAL_STACK);
-	sp.h = hi(INITIAL_STACK);
+	sp.l = _init_thread_union + THREAD_SIZE;
+	sp.h = _init_thread_union + THREAD_SIZE;
 	fp = sp;
 	usp = sp;
 
 #ifdef CONFIG_EARLY_PRINTK
 	call _init_early_exception_vectors;
+	r0 = (EVT_IVHW | EVT_IRPTEN | EVT_EVX | EVT_NMI | EVT_RST | EVT_EMU);
+	sti r0;
 #endif
 
-	r0 = 0 (x);
+	r0 = r6;
 	/* Zero out all of the fun bss regions */
 #if L1_DATA_A_LENGTH > 0
 	r1.l = __sbss_l1;
@@ -188,8 +148,21 @@ ENTRY(__start)
 
 	/* Put The Code for PLL Programming and SDRAM Programming in L1 ISRAM */
 	call _bfin_relocate_l1_mem;
+
+#ifdef CONFIG_ROMKERNEL
+	call _bfin_relocate_xip_data;
+#endif
+
 #ifdef CONFIG_BFIN_KERNEL_CLOCK
+	/* Only use on-chip scratch space for stack when absolutely required
+	 * to avoid Anomaly 05000227 ... we know the init_clocks() func only
+	 * uses L1 text and stack space and no other memory region.
+	 */
+# define KERNEL_CLOCK_STACK (L1_SCRATCH_START + L1_SCRATCH_LENGTH - 12)
+	sp.l = lo(KERNEL_CLOCK_STACK);
+	sp.h = hi(KERNEL_CLOCK_STACK);
 	call _init_clocks;
+	sp = usp;	/* usp hasn't been touched, so restore from there */
 #endif
 
 	/* This section keeps the processor in supervisor mode
@@ -199,19 +172,26 @@ ENTRY(__start)
 
 	/* EVT15 = _real_start */
 
-	p0.l = lo(EVT15);
-	p0.h = hi(EVT15);
 	p1.l = _real_start;
 	p1.h = _real_start;
-	[p0] = p1;
+	[p5 + (EVT15 - COREMMR_BASE)] = p1;
 	csync;
 
+#ifdef CONFIG_EARLY_PRINTK
+	r0 = (EVT_IVG15 | EVT_IVHW | EVT_IRPTEN | EVT_EVX | EVT_NMI | EVT_RST | EVT_EMU) (z);
+#else
 	r0 = EVT_IVG15 (z);
+#endif
 	sti r0;
 
 	raise 15;
+#ifdef CONFIG_EARLY_PRINTK
+	p0.l = _early_trap;
+	p0.h = _early_trap;
+#else
 	p0.l = .LWAIT_HERE;
 	p0.h = .LWAIT_HERE;
+#endif
 	reti = p0;
 #if ANOMALY_05000281
 	nop; nop; nop;
@@ -242,14 +222,7 @@ ENTRY(_real_start)
 	R0 = R7;
 	call _cmdline_init;
 
-	/* Load the current thread pointer and stack */
-	sp.l = _init_thread_union;
-	sp.h = _init_thread_union;
-	p1 = THREAD_SIZE (z);
-	sp = sp + p1;
-	usp = sp;
-	fp = sp;
-	sp += -12;
+	sp += -12 + 4; /* +4 is for reti loading above */
 	call _init_pda
 	sp += 12;
 	jump.l _start_kernel;

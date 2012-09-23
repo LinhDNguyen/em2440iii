@@ -25,6 +25,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
+#include <linux/slab.h>
 
 #include <asm/sgi/hpc3.h>
 #include <asm/sgi/ip22.h>
@@ -878,9 +879,9 @@ static int __devinit hal2_probe(struct platform_device *pdev)
 	struct snd_hal2 *chip;
 	int err;
 
-	card = snd_card_new(index, id, THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index, id, THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	err = hal2_create(card, &chip);
 	if (err < 0) {
@@ -915,7 +916,7 @@ static int __devinit hal2_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int __exit hal2_remove(struct platform_device *pdev)
+static int __devexit hal2_remove(struct platform_device *pdev)
 {
 	struct snd_card *card = platform_get_drvdata(pdev);
 

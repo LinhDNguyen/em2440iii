@@ -18,6 +18,7 @@
 #include <linux/fb.h>
 #include <linux/io.h>
 #include <linux/mutex.h>
+#include <linux/slab.h>
 #include <video/edid.h>
 #include <video/uvesafb.h>
 #ifdef CONFIG_X86
@@ -45,7 +46,7 @@ static struct fb_fix_screeninfo uvesafb_fix __devinitdata = {
 static int mtrr		__devinitdata = 3; /* enable mtrr by default */
 static int blank	= 1;		   /* enable blanking by default */
 static int ypan		= 1; 		 /* 0: scroll, 1: ypan, 2: ywrap */
-static int pmi_setpal	__devinitdata = 1; /* use PMI for palette changes */
+static bool pmi_setpal	__devinitdata = true; /* use PMI for palette changes */
 static int nocrtc	__devinitdata; /* ignore CRTC settings */
 static int noedid	__devinitdata; /* don't try DDC transfers */
 static int vram_remap	__devinitdata; /* set amt. of memory to be used */
@@ -67,11 +68,13 @@ static DEFINE_MUTEX(uvfb_lock);
  * find the kernel part of the task struct, copy the registers and
  * the buffer contents and then complete the task.
  */
-static void uvesafb_cn_callback(void *data)
+static void uvesafb_cn_callback(struct cn_msg *msg, struct netlink_skb_parms *nsp)
 {
-	struct cn_msg *msg = data;
 	struct uvesafb_task *utask;
 	struct uvesafb_ktask *task;
+
+	if (!cap_raised(current_cap(), CAP_SYS_ADMIN))
+		return;
 
 	if (msg->seq >= UVESAFB_TASKS_MAX)
 		return;
@@ -1409,23 +1412,6 @@ static int uvesafb_check_var(struct fb_var_screeninfo *var,
 	return 0;
 }
 
-static void uvesafb_save_state(struct fb_info *info)
-{
-	struct uvesafb_par *par = info->par;
-
-	if (par->vbe_state_saved)
-		kfree(par->vbe_state_saved);
-
-	par->vbe_state_saved = uvesafb_vbe_state_save(par);
-}
-
-static void uvesafb_restore_state(struct fb_info *info)
-{
-	struct uvesafb_par *par = info->par;
-
-	uvesafb_vbe_state_restore(par, par->vbe_state_saved);
-}
-
 static struct fb_ops uvesafb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_open	= uvesafb_open,
@@ -1439,8 +1425,6 @@ static struct fb_ops uvesafb_ops = {
 	.fb_imageblit	= cfb_imageblit,
 	.fb_check_var	= uvesafb_check_var,
 	.fb_set_par	= uvesafb_set_par,
-	.fb_save_state	= uvesafb_save_state,
-	.fb_restore_state = uvesafb_restore_state,
 };
 
 static void __devinit uvesafb_init_info(struct fb_info *info,
@@ -1456,15 +1440,6 @@ static void __devinit uvesafb_init_info(struct fb_info *info,
 	info->fix = uvesafb_fix;
 	info->fix.ypanstep = par->ypan ? 1 : 0;
 	info->fix.ywrapstep = (par->ypan > 1) ? 1 : 0;
-
-	/*
-	 * If we were unable to get the state buffer size, disable
-	 * functions for saving and restoring the hardware state.
-	 */
-	if (par->vbe_state_size == 0) {
-		info->fbops->fb_save_state = NULL;
-		info->fbops->fb_restore_state = NULL;
-	}
 
 	/* Disable blanking if the user requested so. */
 	if (!blank)
@@ -1577,8 +1552,7 @@ static void __devinit uvesafb_init_mtrr(struct fb_info *info)
 			int rc;
 
 			/* Find the largest power-of-two */
-			while (temp_size & (temp_size - 1))
-				temp_size &= (temp_size - 1);
+			temp_size = roundup_pow_of_two(temp_size);
 
 			/* Try and find a power of two to add */
 			do {
@@ -1591,6 +1565,28 @@ static void __devinit uvesafb_init_mtrr(struct fb_info *info)
 #endif /* CONFIG_MTRR */
 }
 
+static void __devinit uvesafb_ioremap(struct fb_info *info)
+{
+#ifdef CONFIG_X86
+	switch (mtrr) {
+	case 1: /* uncachable */
+		info->screen_base = ioremap_nocache(info->fix.smem_start, info->fix.smem_len);
+		break;
+	case 2: /* write-back */
+		info->screen_base = ioremap_cache(info->fix.smem_start, info->fix.smem_len);
+		break;
+	case 3: /* write-combining */
+		info->screen_base = ioremap_wc(info->fix.smem_start, info->fix.smem_len);
+		break;
+	case 4: /* write-through */
+	default:
+		info->screen_base = ioremap(info->fix.smem_start, info->fix.smem_len);
+		break;
+	}
+#else
+	info->screen_base = ioremap(info->fix.smem_start, info->fix.smem_len);
+#endif /* CONFIG_X86 */
+}
 
 static ssize_t uvesafb_show_vbe_ver(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -1761,15 +1757,22 @@ static int __devinit uvesafb_probe(struct platform_device *dev)
 
 	uvesafb_init_info(info, mode);
 
+	if (!request_region(0x3c0, 32, "uvesafb")) {
+		printk(KERN_ERR "uvesafb: request region 0x3c0-0x3e0 failed\n");
+		err = -EIO;
+		goto out_mode;
+	}
+
 	if (!request_mem_region(info->fix.smem_start, info->fix.smem_len,
 				"uvesafb")) {
 		printk(KERN_ERR "uvesafb: cannot reserve video memory at "
 				"0x%lx\n", info->fix.smem_start);
 		err = -EIO;
-		goto out_mode;
+		goto out_reg;
 	}
 
-	info->screen_base = ioremap(info->fix.smem_start, info->fix.smem_len);
+	uvesafb_init_mtrr(info);
+	uvesafb_ioremap(info);
 
 	if (!info->screen_base) {
 		printk(KERN_ERR
@@ -1780,20 +1783,13 @@ static int __devinit uvesafb_probe(struct platform_device *dev)
 		goto out_mem;
 	}
 
-	if (!request_region(0x3c0, 32, "uvesafb")) {
-		printk(KERN_ERR "uvesafb: request region 0x3c0-0x3e0 failed\n");
-		err = -EIO;
-		goto out_unmap;
-	}
-
-	uvesafb_init_mtrr(info);
 	platform_set_drvdata(dev, info);
 
 	if (register_framebuffer(info) < 0) {
 		printk(KERN_ERR
 			"uvesafb: failed to register framebuffer device\n");
 		err = -EINVAL;
-		goto out_reg;
+		goto out_unmap;
 	}
 
 	printk(KERN_INFO "uvesafb: framebuffer at 0x%lx, mapped to 0x%p, "
@@ -1810,12 +1806,12 @@ static int __devinit uvesafb_probe(struct platform_device *dev)
 
 	return 0;
 
-out_reg:
-	release_region(0x3c0, 32);
 out_unmap:
 	iounmap(info->screen_base);
 out_mem:
 	release_mem_region(info->fix.smem_start, info->fix.smem_len);
+out_reg:
+	release_region(0x3c0, 32);
 out_mode:
 	if (!list_empty(&info->modelist))
 		fb_destroy_modelist(&info->modelist);
@@ -2002,12 +1998,7 @@ static void __devexit uvesafb_exit(void)
 
 module_exit(uvesafb_exit);
 
-static int param_get_scroll(char *buffer, struct kernel_param *kp)
-{
-	return 0;
-}
-
-static int param_set_scroll(const char *val, struct kernel_param *kp)
+static int param_set_scroll(const char *val, const struct kernel_param *kp)
 {
 	ypan = 0;
 
@@ -2017,10 +2008,14 @@ static int param_set_scroll(const char *val, struct kernel_param *kp)
 		ypan = 1;
 	else if (!strcmp(val, "ywrap"))
 		ypan = 2;
+	else
+		return -EINVAL;
 
 	return 0;
 }
-
+static struct kernel_param_ops param_ops_scroll = {
+	.set = param_set_scroll,
+};
 #define param_check_scroll(name, p) __param_check(name, p, void)
 
 module_param_named(scroll, ypan, scroll, 0);

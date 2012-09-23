@@ -19,6 +19,7 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/ds1wm.h>
 #include <linux/mfd/htc-pasic3.h>
+#include <linux/slab.h>
 
 struct pasic3_data {
 	void __iomem *mapping;
@@ -35,7 +36,7 @@ struct pasic3_data {
  */
 void pasic3_write_register(struct device *dev, u32 reg, u8 val)
 {
-	struct pasic3_data *asic = dev->driver_data;
+	struct pasic3_data *asic = dev_get_drvdata(dev);
 	int bus_shift = asic->bus_shift;
 	void __iomem *addr = asic->mapping + (REG_ADDR << bus_shift);
 	void __iomem *data = asic->mapping + (REG_DATA << bus_shift);
@@ -50,7 +51,7 @@ EXPORT_SYMBOL(pasic3_write_register); /* for leds-pasic3 */
  */
 u8 pasic3_read_register(struct device *dev, u32 reg)
 {
-	struct pasic3_data *asic = dev->driver_data;
+	struct pasic3_data *asic = dev_get_drvdata(dev);
 	int bus_shift = asic->bus_shift;
 	void __iomem *addr = asic->mapping + (REG_ADDR << bus_shift);
 	void __iomem *data = asic->mapping + (REG_DATA << bus_shift);
@@ -98,6 +99,7 @@ static int ds1wm_disable(struct platform_device *pdev)
 
 static struct ds1wm_driver_data ds1wm_pdata = {
 	.active_high = 0,
+	.reset_recover_delay = 1,
 };
 
 static struct resource ds1wm_resources[] __initdata = {
@@ -116,7 +118,8 @@ static struct mfd_cell ds1wm_cell __initdata = {
 	.name          = "ds1wm",
 	.enable        = ds1wm_enable,
 	.disable       = ds1wm_disable,
-	.driver_data   = &ds1wm_pdata,
+	.platform_data = &ds1wm_pdata,
+	.pdata_size    = sizeof(ds1wm_pdata),
 	.num_resources = 2,
 	.resources     = ds1wm_resources,
 };
@@ -129,13 +132,6 @@ static int __init pasic3_probe(struct platform_device *pdev)
 	struct resource *r;
 	int ret;
 	int irq = 0;
-
-	r = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
-	if (r) {
-		ds1wm_resources[1].flags = IORESOURCE_IRQ | (r->flags &
-			(IORESOURCE_IRQ_HIGHEDGE | IORESOURCE_IRQ_LOWEDGE));
-		irq = r->start;
-	}
 
 	r = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
 	if (r) {
@@ -171,8 +167,6 @@ static int __init pasic3_probe(struct platform_device *pdev)
 		ds1wm_pdata.clock_rate = pdata->clock_rate;
 		/* the first 5 PASIC3 registers control the DS1WM */
 		ds1wm_resources[0].end = (5 << asic->bus_shift) - 1;
-		ds1wm_cell.platform_data = &ds1wm_cell;
-		ds1wm_cell.data_size = sizeof(ds1wm_cell);
 		ret = mfd_add_devices(&pdev->dev, pdev->id,
 				&ds1wm_cell, 1, r, irq);
 		if (ret < 0)
@@ -180,9 +174,8 @@ static int __init pasic3_probe(struct platform_device *pdev)
 	}
 
 	if (pdata && pdata->led_pdata) {
-		led_cell.driver_data = pdata->led_pdata;
-		led_cell.platform_data = &led_cell;
-		led_cell.data_size = sizeof(ds1wm_cell);
+		led_cell.platform_data = pdata->led_pdata;
+		led_cell.pdata_size = sizeof(struct pasic3_leds_machinfo);
 		ret = mfd_add_devices(&pdev->dev, pdev->id, &led_cell, 1, r, 0);
 		if (ret < 0)
 			dev_warn(dev, "failed to register LED device\n");

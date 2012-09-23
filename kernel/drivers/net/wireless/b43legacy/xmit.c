@@ -6,7 +6,7 @@
 
   Copyright (C) 2005 Martin Langer <martin-langer@gmx.de>
   Copyright (C) 2005 Stefano Brivio <stefano.brivio@polimi.it>
-  Copyright (C) 2005, 2006 Michael Buesch <mb@bu3sch.de>
+  Copyright (C) 2005, 2006 Michael Buesch <m@bues.ch>
   Copyright (C) 2005 Danny van Dyk <kugelfang@gentoo.org>
   Copyright (C) 2005 Andreas Jaggi <andreas.jaggi@waterwave.ch>
   Copyright (C) 2007 Larry Finger <Larry.Finger@lwfinger.net>
@@ -274,7 +274,7 @@ static int generate_txhdr_fw3(struct b43legacy_wldev *dev,
 
 	/* PHY TX Control word */
 	if (rate_ofdm)
-		phy_ctl |= B43legacy_TX4_PHY_OFDM;
+		phy_ctl |= B43legacy_TX4_PHY_ENC_OFDM;
 	if (info->control.rates[0].flags & IEEE80211_TX_RC_USE_SHORT_PREAMBLE)
 		phy_ctl |= B43legacy_TX4_PHY_SHORTPRMBL;
 	switch (info->antenna_sel_tx) {
@@ -321,11 +321,9 @@ static int generate_txhdr_fw3(struct b43legacy_wldev *dev,
 		struct ieee80211_hdr *hdr;
 		int rts_rate;
 		int rts_rate_fb;
-		int rts_rate_ofdm;
 		int rts_rate_fb_ofdm;
 
 		rts_rate = ieee80211_get_rts_cts_rate(dev->wl->hw, info)->hw_value;
-		rts_rate_ofdm = b43legacy_is_ofdm_rate(rts_rate);
 		rts_rate_fb = b43legacy_calc_fallback_rate(rts_rate);
 		rts_rate_fb_ofdm = b43legacy_is_ofdm_rate(rts_rate_fb);
 		if (rts_rate_fb_ofdm)
@@ -548,8 +546,6 @@ void b43legacy_rx(struct b43legacy_wldev *dev,
 				      (phystat0 & B43legacy_RX_PHYST0_OFDM),
 				      (phystat0 & B43legacy_RX_PHYST0_GAINCTL),
 				      (phystat3 & B43legacy_RX_PHYST3_TRSTATE));
-	status.noise = dev->stats.link_noise;
-	status.qual = (jssi * 100) / B43legacy_RX_MAX_SSI;
 	/* change to support A PHY */
 	if (phystat0 & B43legacy_RX_PHYST0_OFDM)
 		status.rate_idx = b43legacy_plcp_get_bitrate_idx_ofdm(plcp, false);
@@ -574,7 +570,7 @@ void b43legacy_rx(struct b43legacy_wldev *dev,
 		status.mactime += mactime;
 		if (low_mactime_now <= mactime)
 			status.mactime -= 0x10000;
-		status.flag |= RX_FLAG_TSFT;
+		status.flag |= RX_FLAG_MACTIME_MPDU;
 	}
 
 	chanid = (chanstat & B43legacy_RX_CHAN_ID) >>
@@ -590,8 +586,8 @@ void b43legacy_rx(struct b43legacy_wldev *dev,
 		       chanstat);
 	}
 
-	dev->stats.last_rx = jiffies;
-	ieee80211_rx_irqsafe(dev->wl->hw, skb, &status);
+	memcpy(IEEE80211_SKB_RXCB(skb), &status, sizeof(status));
+	ieee80211_rx_irqsafe(dev->wl->hw, skb);
 
 	return;
 drop:

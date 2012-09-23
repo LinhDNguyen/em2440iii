@@ -2,7 +2,7 @@
  *  cx18 mailbox functions
  *
  *  Copyright (C) 2007  Hans Verkuil <hverkuil@xs4all.nl>
- *  Copyright (C) 2008  Andy Walls <awalls@radix.net>
+ *  Copyright (C) 2008  Andy Walls <awalls@md.metrocast.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -29,6 +29,7 @@
 #include "cx18-mailbox.h"
 #include "cx18-queue.h"
 #include "cx18-streams.h"
+#include "cx18-alsa-pcm.h" /* FIXME make configurable */
 
 static const char *rpu_str[] = { "APU", "CPU", "EPU", "HPU" };
 
@@ -80,6 +81,7 @@ static const struct cx18_api_info api_info[] = {
 	API_ENTRY(CPU, CX18_CPU_SET_SLICED_VBI_PARAM,           0),
 	API_ENTRY(CPU, CX18_CPU_SET_USERDATA_PLACE_HOLDER,      0),
 	API_ENTRY(CPU, CX18_CPU_GET_ENC_PTS,                    0),
+	API_ENTRY(CPU, CX18_CPU_SET_VFC_PARAM,                  0),
 	API_ENTRY(CPU, CX18_CPU_DE_SET_MDL_ACK,			0),
 	API_ENTRY(CPU, CX18_CPU_DE_SET_MDL,			API_FAST),
 	API_ENTRY(CPU, CX18_CPU_DE_RELEASE_MDL,			API_SLOW),
@@ -131,13 +133,121 @@ static void dump_mb(struct cx18 *cx, struct cx18_mailbox *mb, char *name)
  * Functions that run in a work_queue work handling context
  */
 
-static void epu_dma_done(struct cx18 *cx, struct cx18_epu_work_order *order)
+static void cx18_mdl_send_to_dvb(struct cx18_stream *s, struct cx18_mdl *mdl)
+{
+	struct cx18_buffer *buf;
+
+	if (s->dvb == NULL || !s->dvb->enabled || mdl->bytesused == 0)
+		return;
+
+	/* We ignore mdl and buf readpos accounting here - it doesn't matter */
+
+	/* The likely case */
+	if (list_is_singular(&mdl->buf_list)) {
+		buf = list_first_entry(&mdl->buf_list, struct cx18_buffer,
+				       list);
+		if (buf->bytesused)
+			dvb_dmx_swfilter(&s->dvb->demux,
+					 buf->buf, buf->bytesused);
+		return;
+	}
+
+	list_for_each_entry(buf, &mdl->buf_list, list) {
+		if (buf->bytesused == 0)
+			break;
+		dvb_dmx_swfilter(&s->dvb->demux, buf->buf, buf->bytesused);
+	}
+}
+
+static void cx18_mdl_send_to_videobuf(struct cx18_stream *s,
+	struct cx18_mdl *mdl)
+{
+	struct cx18_videobuf_buffer *vb_buf;
+	struct cx18_buffer *buf;
+	u8 *p;
+	u32 offset = 0;
+	int dispatch = 0;
+
+	if (mdl->bytesused == 0)
+		return;
+
+	/* Acquire a videobuf buffer, clone to and and release it */
+	spin_lock(&s->vb_lock);
+	if (list_empty(&s->vb_capture))
+		goto out;
+
+	vb_buf = list_first_entry(&s->vb_capture, struct cx18_videobuf_buffer,
+		vb.queue);
+
+	p = videobuf_to_vmalloc(&vb_buf->vb);
+	if (!p)
+		goto out;
+
+	offset = vb_buf->bytes_used;
+	list_for_each_entry(buf, &mdl->buf_list, list) {
+		if (buf->bytesused == 0)
+			break;
+
+		if ((offset + buf->bytesused) <= vb_buf->vb.bsize) {
+			memcpy(p + offset, buf->buf, buf->bytesused);
+			offset += buf->bytesused;
+			vb_buf->bytes_used += buf->bytesused;
+		}
+	}
+
+	/* If we've filled the buffer as per the callers res then dispatch it */
+	if (vb_buf->bytes_used >= (vb_buf->vb.width * vb_buf->vb.height * 2)) {
+		dispatch = 1;
+		vb_buf->bytes_used = 0;
+	}
+
+	if (dispatch) {
+		vb_buf->vb.ts = ktime_to_timeval(ktime_get());
+		list_del(&vb_buf->vb.queue);
+		vb_buf->vb.state = VIDEOBUF_DONE;
+		wake_up(&vb_buf->vb.done);
+	}
+
+	mod_timer(&s->vb_timeout, msecs_to_jiffies(2000) + jiffies);
+
+out:
+	spin_unlock(&s->vb_lock);
+}
+
+static void cx18_mdl_send_to_alsa(struct cx18 *cx, struct cx18_stream *s,
+				  struct cx18_mdl *mdl)
+{
+	struct cx18_buffer *buf;
+
+	if (mdl->bytesused == 0)
+		return;
+
+	/* We ignore mdl and buf readpos accounting here - it doesn't matter */
+
+	/* The likely case */
+	if (list_is_singular(&mdl->buf_list)) {
+		buf = list_first_entry(&mdl->buf_list, struct cx18_buffer,
+				       list);
+		if (buf->bytesused)
+			cx->pcm_announce_callback(cx->alsa, buf->buf,
+						  buf->bytesused);
+		return;
+	}
+
+	list_for_each_entry(buf, &mdl->buf_list, list) {
+		if (buf->bytesused == 0)
+			break;
+		cx->pcm_announce_callback(cx->alsa, buf->buf, buf->bytesused);
+	}
+}
+
+static void epu_dma_done(struct cx18 *cx, struct cx18_in_work_order *order)
 {
 	u32 handle, mdl_ack_count, id;
 	struct cx18_mailbox *mb;
 	struct cx18_mdl_ack *mdl_ack;
 	struct cx18_stream *s;
-	struct cx18_buffer *buf;
+	struct cx18_mdl *mdl;
 	int i;
 
 	mb = &order->mb;
@@ -158,7 +268,7 @@ static void epu_dma_done(struct cx18 *cx, struct cx18_epu_work_order *order)
 		id = mdl_ack->id;
 		/*
 		 * Simple integrity check for processing a stale (and possibly
-		 * inconsistent mailbox): make sure the buffer id is in the
+		 * inconsistent mailbox): make sure the MDL id is in the
 		 * valid range for the stream.
 		 *
 		 * We go through the trouble of dealing with stale mailboxes
@@ -169,51 +279,63 @@ static void epu_dma_done(struct cx18 *cx, struct cx18_epu_work_order *order)
 		 * There are occasions when we get a half changed mailbox,
 		 * which this check catches for a handle & id mismatch.  If the
 		 * handle and id do correspond, the worst case is that we
-		 * completely lost the old buffer, but pick up the new buffer
+		 * completely lost the old MDL, but pick up the new MDL
 		 * early (but the new mdl_ack is guaranteed to be good in this
 		 * case as the firmware wouldn't point us to a new mdl_ack until
 		 * it's filled in).
 		 *
-		 * cx18_queue_get buf() will detect the lost buffers
+		 * cx18_queue_get_mdl() will detect the lost MDLs
 		 * and send them back to q_free for fw rotation eventually.
 		 */
 		if ((order->flags & CX18_F_EWO_MB_STALE_UPON_RECEIPT) &&
-		    !(id >= s->mdl_offset &&
-		      id < (s->mdl_offset + s->buffers))) {
+		    !(id >= s->mdl_base_idx &&
+		      id < (s->mdl_base_idx + s->buffers))) {
 			CX18_WARN("Fell behind! Ignoring stale mailbox with "
-				  " inconsistent data. Lost buffer for mailbox "
+				  " inconsistent data. Lost MDL for mailbox "
 				  "seq no %d\n", mb->request);
 			break;
 		}
-		buf = cx18_queue_get_buf(s, id, mdl_ack->data_used);
+		mdl = cx18_queue_get_mdl(s, id, mdl_ack->data_used);
 
-		CX18_DEBUG_HI_DMA("DMA DONE for %s (buffer %d)\n", s->name, id);
-		if (buf == NULL) {
-			CX18_WARN("Could not find buf %d for stream %s\n",
+		CX18_DEBUG_HI_DMA("DMA DONE for %s (MDL %d)\n", s->name, id);
+		if (mdl == NULL) {
+			CX18_WARN("Could not find MDL %d for stream %s\n",
 				  id, s->name);
-			/* Put as many buffers as possible back into fw use */
-			cx18_stream_load_fw_queue(s);
 			continue;
 		}
 
-		if (s->type == CX18_ENC_STREAM_TYPE_TS && s->dvb.enabled) {
-			CX18_DEBUG_HI_DMA("TS recv bytesused = %d\n",
-					  buf->bytesused);
-			dvb_dmx_swfilter(&s->dvb.demux, buf->buf,
-					 buf->bytesused);
+		CX18_DEBUG_HI_DMA("%s recv bytesused = %d\n",
+				  s->name, mdl->bytesused);
+
+		if (s->type == CX18_ENC_STREAM_TYPE_TS) {
+			cx18_mdl_send_to_dvb(s, mdl);
+			cx18_enqueue(s, mdl, &s->q_free);
+		} else if (s->type == CX18_ENC_STREAM_TYPE_PCM) {
+			/* Pass the data to cx18-alsa */
+			if (cx->pcm_announce_callback != NULL) {
+				cx18_mdl_send_to_alsa(cx, s, mdl);
+				cx18_enqueue(s, mdl, &s->q_free);
+			} else {
+				cx18_enqueue(s, mdl, &s->q_full);
+			}
+		} else if (s->type == CX18_ENC_STREAM_TYPE_YUV) {
+			cx18_mdl_send_to_videobuf(s, mdl);
+			cx18_enqueue(s, mdl, &s->q_free);
+		} else {
+			cx18_enqueue(s, mdl, &s->q_full);
+			if (s->type == CX18_ENC_STREAM_TYPE_IDX)
+				cx18_stream_rotate_idx_mdls(cx);
 		}
-		/* Put as many buffers as possible back into fw use */
-		cx18_stream_load_fw_queue(s);
-		/* Put back TS buffer, since it was removed from all queues */
-		if (s->type == CX18_ENC_STREAM_TYPE_TS)
-			cx18_stream_put_buf_fw(s, buf);
 	}
+	/* Put as many MDLs as possible back into fw use */
+	cx18_stream_load_fw_queue(s);
+
 	wake_up(&cx->dma_waitq);
 	if (s->id != -1)
 		wake_up(&s->waitq);
 }
 
-static void epu_debug(struct cx18 *cx, struct cx18_epu_work_order *order)
+static void epu_debug(struct cx18 *cx, struct cx18_in_work_order *order)
 {
 	char *p;
 	char *str = order->str;
@@ -224,7 +346,7 @@ static void epu_debug(struct cx18 *cx, struct cx18_epu_work_order *order)
 		CX18_INFO("FW version: %s\n", p - 1);
 }
 
-static void epu_cmd(struct cx18 *cx, struct cx18_epu_work_order *order)
+static void epu_cmd(struct cx18 *cx, struct cx18_in_work_order *order)
 {
 	switch (order->rpu) {
 	case CPU:
@@ -253,18 +375,18 @@ static void epu_cmd(struct cx18 *cx, struct cx18_epu_work_order *order)
 }
 
 static
-void free_epu_work_order(struct cx18 *cx, struct cx18_epu_work_order *order)
+void free_in_work_order(struct cx18 *cx, struct cx18_in_work_order *order)
 {
 	atomic_set(&order->pending, 0);
 }
 
-void cx18_epu_work_handler(struct work_struct *work)
+void cx18_in_work_handler(struct work_struct *work)
 {
-	struct cx18_epu_work_order *order =
-			container_of(work, struct cx18_epu_work_order, work);
+	struct cx18_in_work_order *order =
+			container_of(work, struct cx18_in_work_order, work);
 	struct cx18 *cx = order->cx;
 	epu_cmd(cx, order);
-	free_epu_work_order(cx, order);
+	free_in_work_order(cx, order);
 }
 
 
@@ -272,7 +394,7 @@ void cx18_epu_work_handler(struct work_struct *work)
  * Functions that run in an interrupt handling context
  */
 
-static void mb_ack_irq(struct cx18 *cx, struct cx18_epu_work_order *order)
+static void mb_ack_irq(struct cx18 *cx, struct cx18_in_work_order *order)
 {
 	struct cx18_mailbox __iomem *ack_mb;
 	u32 ack_irq, req;
@@ -308,7 +430,7 @@ static void mb_ack_irq(struct cx18 *cx, struct cx18_epu_work_order *order)
 	return;
 }
 
-static int epu_dma_done_irq(struct cx18 *cx, struct cx18_epu_work_order *order)
+static int epu_dma_done_irq(struct cx18 *cx, struct cx18_in_work_order *order)
 {
 	u32 handle, mdl_ack_offset, mdl_ack_count;
 	struct cx18_mailbox *mb;
@@ -334,7 +456,7 @@ static int epu_dma_done_irq(struct cx18 *cx, struct cx18_epu_work_order *order)
 }
 
 static
-int epu_debug_irq(struct cx18 *cx, struct cx18_epu_work_order *order)
+int epu_debug_irq(struct cx18 *cx, struct cx18_in_work_order *order)
 {
 	u32 str_offset;
 	char *str = order->str;
@@ -355,7 +477,7 @@ int epu_debug_irq(struct cx18 *cx, struct cx18_epu_work_order *order)
 }
 
 static inline
-int epu_cmd_irq(struct cx18 *cx, struct cx18_epu_work_order *order)
+int epu_cmd_irq(struct cx18 *cx, struct cx18_in_work_order *order)
 {
 	int ret = -1;
 
@@ -387,12 +509,12 @@ int epu_cmd_irq(struct cx18 *cx, struct cx18_epu_work_order *order)
 }
 
 static inline
-struct cx18_epu_work_order *alloc_epu_work_order_irq(struct cx18 *cx)
+struct cx18_in_work_order *alloc_in_work_order_irq(struct cx18 *cx)
 {
 	int i;
-	struct cx18_epu_work_order *order = NULL;
+	struct cx18_in_work_order *order = NULL;
 
-	for (i = 0; i < CX18_MAX_EPU_WORK_ORDERS; i++) {
+	for (i = 0; i < CX18_MAX_IN_WORK_ORDERS; i++) {
 		/*
 		 * We only need "pending" atomic to inspect its contents,
 		 * and need not do a check and set because:
@@ -401,8 +523,8 @@ struct cx18_epu_work_order *alloc_epu_work_order_irq(struct cx18 *cx)
 		 * 2. "pending" is only set here, and we're serialized because
 		 * we're called in an IRQ handler context.
 		 */
-		if (atomic_read(&cx->epu_work_order[i].pending) == 0) {
-			order = &cx->epu_work_order[i];
+		if (atomic_read(&cx->in_work_order[i].pending) == 0) {
+			order = &cx->in_work_order[i];
 			atomic_set(&order->pending, 1);
 			break;
 		}
@@ -414,7 +536,7 @@ void cx18_api_epu_cmd_irq(struct cx18 *cx, int rpu)
 {
 	struct cx18_mailbox __iomem *mb;
 	struct cx18_mailbox *order_mb;
-	struct cx18_epu_work_order *order;
+	struct cx18_in_work_order *order;
 	int submit;
 
 	switch (rpu) {
@@ -428,7 +550,7 @@ void cx18_api_epu_cmd_irq(struct cx18 *cx, int rpu)
 		return;
 	}
 
-	order = alloc_epu_work_order_irq(cx);
+	order = alloc_in_work_order_irq(cx);
 	if (order == NULL) {
 		CX18_WARN("Unable to find blank work order form to schedule "
 			  "incoming mailbox command processing\n");
@@ -461,7 +583,7 @@ void cx18_api_epu_cmd_irq(struct cx18 *cx, int rpu)
 	 */
 	submit = epu_cmd_irq(cx, order);
 	if (submit > 0) {
-		queue_work(cx->work_queue, &order->work);
+		queue_work(cx->in_work_queue, &order->work);
 	}
 }
 
@@ -478,9 +600,10 @@ static int cx18_api_call(struct cx18 *cx, u32 cmd, int args, u32 data[])
 	u32 __iomem *xpu_state;
 	wait_queue_head_t *waitq;
 	struct mutex *mb_lock;
-	long int timeout, ret;
+	unsigned long int t0, timeout, ret;
 	int i;
 	char argstr[MAX_MB_ARGUMENTS*11+1];
+	DEFINE_WAIT(w);
 
 	if (info == NULL) {
 		CX18_WARN("unknown cmd %x\n", cmd);
@@ -562,25 +685,49 @@ static int cx18_api_call(struct cx18 *cx, u32 cmd, int args, u32 data[])
 
 	CX18_DEBUG_HI_IRQ("sending interrupt SW1: %x to send %s\n",
 			  irq, info->name);
+
+	/* So we don't miss the wakeup, prepare to wait before notifying fw */
+	prepare_to_wait(waitq, &w, TASK_UNINTERRUPTIBLE);
 	cx18_write_reg_expect(cx, irq, SW1_INT_SET, irq, irq);
 
-	ret = wait_event_timeout(
-		       *waitq,
-		       cx18_readl(cx, &mb->ack) == cx18_readl(cx, &mb->request),
-		       timeout);
+	t0 = jiffies;
+	ack = cx18_readl(cx, &mb->ack);
+	if (ack != req) {
+		schedule_timeout(timeout);
+		ret = jiffies - t0;
+		ack = cx18_readl(cx, &mb->ack);
+	} else {
+		ret = jiffies - t0;
+	}
 
-	if (ret == 0) {
-		/* Timed out */
+	finish_wait(waitq, &w);
+
+	if (req != ack) {
 		mutex_unlock(mb_lock);
-		CX18_DEBUG_WARN("sending %s timed out waiting %d msecs for RPU "
-				"acknowledgement\n",
-				info->name, jiffies_to_msecs(timeout));
+		if (ret >= timeout) {
+			/* Timed out */
+			CX18_DEBUG_WARN("sending %s timed out waiting %d msecs "
+					"for RPU acknowledgement\n",
+					info->name, jiffies_to_msecs(ret));
+		} else {
+			CX18_DEBUG_WARN("woken up before mailbox ack was ready "
+					"after submitting %s to RPU.  only "
+					"waited %d msecs on req %u but awakened"
+					" with unmatched ack %u\n",
+					info->name,
+					jiffies_to_msecs(ret),
+					req, ack);
+		}
 		return -EINVAL;
 	}
 
-	if (ret != timeout)
+	if (ret >= timeout)
+		CX18_DEBUG_WARN("failed to be awakened upon RPU acknowledgment "
+				"sending %s; timed out waiting %d msecs\n",
+				info->name, jiffies_to_msecs(ret));
+	else
 		CX18_DEBUG_HI_API("waited %u msecs for %s to be acked\n",
-				  jiffies_to_msecs(timeout-ret), info->name);
+				  jiffies_to_msecs(ret), info->name);
 
 	/* Collect data returned by the XPU */
 	for (i = 0; i < MAX_MB_ARGUMENTS; i++)
@@ -590,7 +737,7 @@ static int cx18_api_call(struct cx18 *cx, u32 cmd, int args, u32 data[])
 
 	/*
 	 * Wait for XPU to perform extra actions for the caller in some cases.
-	 * e.g. CX18_CPU_DE_RELEASE_MDL will cause the CPU to send all buffers
+	 * e.g. CX18_CPU_DE_RELEASE_MDL will cause the CPU to send all MDLs
 	 * back in a burst shortly thereafter
 	 */
 	if (info->flags & API_SLOW)
@@ -627,9 +774,8 @@ static int cx18_set_filter_param(struct cx18_stream *s)
 int cx18_api_func(void *priv, u32 cmd, int in, int out,
 		u32 data[CX2341X_MBOX_MAX_DATA])
 {
-	struct cx18_api_func_private *api_priv = priv;
-	struct cx18 *cx = api_priv->cx;
-	struct cx18_stream *s = api_priv->s;
+	struct cx18_stream *s = priv;
+	struct cx18 *cx = s->cx;
 
 	switch (cmd) {
 	case CX2341X_ENC_SET_OUTPUT_PORT:

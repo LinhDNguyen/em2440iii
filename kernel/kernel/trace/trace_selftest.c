@@ -3,6 +3,7 @@
 #include <linux/stringify.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
+#include <linux/slab.h>
 
 static inline int trace_valid_entry(struct trace_entry *entry)
 {
@@ -12,7 +13,6 @@ static inline int trace_valid_entry(struct trace_entry *entry)
 	case TRACE_WAKE:
 	case TRACE_STACK:
 	case TRACE_PRINT:
-	case TRACE_SPECIAL:
 	case TRACE_BRANCH:
 	case TRACE_GRAPH_ENT:
 	case TRACE_GRAPH_RET:
@@ -27,7 +27,7 @@ static int trace_test_buffer_cpu(struct trace_array *tr, int cpu)
 	struct trace_entry *entry;
 	unsigned int loops = 0;
 
-	while ((event = ring_buffer_consume(tr->buffer, cpu, NULL))) {
+	while ((event = ring_buffer_consume(tr->buffer, cpu, NULL, NULL))) {
 		entry = ring_buffer_event_data(event);
 
 		/*
@@ -65,7 +65,7 @@ static int trace_test_buffer(struct trace_array *tr, unsigned long *count)
 
 	/* Don't allow flipping of max traces now */
 	local_irq_save(flags);
-	__raw_spin_lock(&ftrace_max_lock);
+	arch_spin_lock(&ftrace_max_lock);
 
 	cnt = ring_buffer_entries(tr->buffer);
 
@@ -83,7 +83,7 @@ static int trace_test_buffer(struct trace_array *tr, unsigned long *count)
 			break;
 	}
 	tracing_on();
-	__raw_spin_unlock(&ftrace_max_lock);
+	arch_spin_unlock(&ftrace_max_lock);
 	local_irq_restore(flags);
 
 	if (count)
@@ -100,6 +100,206 @@ static inline void warn_failed_init_tracer(struct tracer *trace, int init_ret)
 #ifdef CONFIG_FUNCTION_TRACER
 
 #ifdef CONFIG_DYNAMIC_FTRACE
+
+static int trace_selftest_test_probe1_cnt;
+static void trace_selftest_test_probe1_func(unsigned long ip,
+					    unsigned long pip)
+{
+	trace_selftest_test_probe1_cnt++;
+}
+
+static int trace_selftest_test_probe2_cnt;
+static void trace_selftest_test_probe2_func(unsigned long ip,
+					    unsigned long pip)
+{
+	trace_selftest_test_probe2_cnt++;
+}
+
+static int trace_selftest_test_probe3_cnt;
+static void trace_selftest_test_probe3_func(unsigned long ip,
+					    unsigned long pip)
+{
+	trace_selftest_test_probe3_cnt++;
+}
+
+static int trace_selftest_test_global_cnt;
+static void trace_selftest_test_global_func(unsigned long ip,
+					    unsigned long pip)
+{
+	trace_selftest_test_global_cnt++;
+}
+
+static int trace_selftest_test_dyn_cnt;
+static void trace_selftest_test_dyn_func(unsigned long ip,
+					 unsigned long pip)
+{
+	trace_selftest_test_dyn_cnt++;
+}
+
+static struct ftrace_ops test_probe1 = {
+	.func			= trace_selftest_test_probe1_func,
+};
+
+static struct ftrace_ops test_probe2 = {
+	.func			= trace_selftest_test_probe2_func,
+};
+
+static struct ftrace_ops test_probe3 = {
+	.func			= trace_selftest_test_probe3_func,
+};
+
+static struct ftrace_ops test_global = {
+	.func			= trace_selftest_test_global_func,
+	.flags			= FTRACE_OPS_FL_GLOBAL,
+};
+
+static void print_counts(void)
+{
+	printk("(%d %d %d %d %d) ",
+	       trace_selftest_test_probe1_cnt,
+	       trace_selftest_test_probe2_cnt,
+	       trace_selftest_test_probe3_cnt,
+	       trace_selftest_test_global_cnt,
+	       trace_selftest_test_dyn_cnt);
+}
+
+static void reset_counts(void)
+{
+	trace_selftest_test_probe1_cnt = 0;
+	trace_selftest_test_probe2_cnt = 0;
+	trace_selftest_test_probe3_cnt = 0;
+	trace_selftest_test_global_cnt = 0;
+	trace_selftest_test_dyn_cnt = 0;
+}
+
+static int trace_selftest_ops(int cnt)
+{
+	int save_ftrace_enabled = ftrace_enabled;
+	struct ftrace_ops *dyn_ops;
+	char *func1_name;
+	char *func2_name;
+	int len1;
+	int len2;
+	int ret = -1;
+
+	printk(KERN_CONT "PASSED\n");
+	pr_info("Testing dynamic ftrace ops #%d: ", cnt);
+
+	ftrace_enabled = 1;
+	reset_counts();
+
+	/* Handle PPC64 '.' name */
+	func1_name = "*" __stringify(DYN_FTRACE_TEST_NAME);
+	func2_name = "*" __stringify(DYN_FTRACE_TEST_NAME2);
+	len1 = strlen(func1_name);
+	len2 = strlen(func2_name);
+
+	/*
+	 * Probe 1 will trace function 1.
+	 * Probe 2 will trace function 2.
+	 * Probe 3 will trace functions 1 and 2.
+	 */
+	ftrace_set_filter(&test_probe1, func1_name, len1, 1);
+	ftrace_set_filter(&test_probe2, func2_name, len2, 1);
+	ftrace_set_filter(&test_probe3, func1_name, len1, 1);
+	ftrace_set_filter(&test_probe3, func2_name, len2, 0);
+
+	register_ftrace_function(&test_probe1);
+	register_ftrace_function(&test_probe2);
+	register_ftrace_function(&test_probe3);
+	register_ftrace_function(&test_global);
+
+	DYN_FTRACE_TEST_NAME();
+
+	print_counts();
+
+	if (trace_selftest_test_probe1_cnt != 1)
+		goto out;
+	if (trace_selftest_test_probe2_cnt != 0)
+		goto out;
+	if (trace_selftest_test_probe3_cnt != 1)
+		goto out;
+	if (trace_selftest_test_global_cnt == 0)
+		goto out;
+
+	DYN_FTRACE_TEST_NAME2();
+
+	print_counts();
+
+	if (trace_selftest_test_probe1_cnt != 1)
+		goto out;
+	if (trace_selftest_test_probe2_cnt != 1)
+		goto out;
+	if (trace_selftest_test_probe3_cnt != 2)
+		goto out;
+
+	/* Add a dynamic probe */
+	dyn_ops = kzalloc(sizeof(*dyn_ops), GFP_KERNEL);
+	if (!dyn_ops) {
+		printk("MEMORY ERROR ");
+		goto out;
+	}
+
+	dyn_ops->func = trace_selftest_test_dyn_func;
+
+	register_ftrace_function(dyn_ops);
+
+	trace_selftest_test_global_cnt = 0;
+
+	DYN_FTRACE_TEST_NAME();
+
+	print_counts();
+
+	if (trace_selftest_test_probe1_cnt != 2)
+		goto out_free;
+	if (trace_selftest_test_probe2_cnt != 1)
+		goto out_free;
+	if (trace_selftest_test_probe3_cnt != 3)
+		goto out_free;
+	if (trace_selftest_test_global_cnt == 0)
+		goto out;
+	if (trace_selftest_test_dyn_cnt == 0)
+		goto out_free;
+
+	DYN_FTRACE_TEST_NAME2();
+
+	print_counts();
+
+	if (trace_selftest_test_probe1_cnt != 2)
+		goto out_free;
+	if (trace_selftest_test_probe2_cnt != 2)
+		goto out_free;
+	if (trace_selftest_test_probe3_cnt != 4)
+		goto out_free;
+
+	ret = 0;
+ out_free:
+	unregister_ftrace_function(dyn_ops);
+	kfree(dyn_ops);
+
+ out:
+	/* Purposely unregister in the same order */
+	unregister_ftrace_function(&test_probe1);
+	unregister_ftrace_function(&test_probe2);
+	unregister_ftrace_function(&test_probe3);
+	unregister_ftrace_function(&test_global);
+
+	/* Make sure everything is off */
+	reset_counts();
+	DYN_FTRACE_TEST_NAME();
+	DYN_FTRACE_TEST_NAME();
+
+	if (trace_selftest_test_probe1_cnt ||
+	    trace_selftest_test_probe2_cnt ||
+	    trace_selftest_test_probe3_cnt ||
+	    trace_selftest_test_global_cnt ||
+	    trace_selftest_test_dyn_cnt)
+		ret = -1;
+
+	ftrace_enabled = save_ftrace_enabled;
+
+	return ret;
+}
 
 /* Test dynamic code modification and ftrace filters */
 int trace_selftest_startup_dynamic_tracing(struct tracer *trace,
@@ -131,7 +331,7 @@ int trace_selftest_startup_dynamic_tracing(struct tracer *trace,
 	func_name = "*" __stringify(DYN_FTRACE_TEST_NAME);
 
 	/* filter only on our function */
-	ftrace_set_filter(func_name, strlen(func_name), 1);
+	ftrace_set_global_filter(func_name, strlen(func_name), 1);
 
 	/* enable tracing */
 	ret = tracer_init(trace, tr);
@@ -166,28 +366,37 @@ int trace_selftest_startup_dynamic_tracing(struct tracer *trace,
 
 	/* check the trace buffer */
 	ret = trace_test_buffer(tr, &count);
-	trace->reset(tr);
 	tracing_start();
 
 	/* we should only have one item */
 	if (!ret && count != 1) {
+		trace->reset(tr);
 		printk(KERN_CONT ".. filter failed count=%ld ..", count);
 		ret = -1;
 		goto out;
 	}
+
+	/* Test the ops with global tracing running */
+	ret = trace_selftest_ops(1);
+	trace->reset(tr);
 
  out:
 	ftrace_enabled = save_ftrace_enabled;
 	tracer_enabled = save_tracer_enabled;
 
 	/* Enable tracing on all functions again */
-	ftrace_set_filter(NULL, 0, 1);
+	ftrace_set_global_filter(NULL, 0, 1);
+
+	/* Test the ops with global tracing off */
+	if (!ret)
+		ret = trace_selftest_ops(2);
 
 	return ret;
 }
 #else
 # define trace_selftest_startup_dynamic_tracing(trace, tr, func) ({ 0; })
 #endif /* CONFIG_DYNAMIC_FTRACE */
+
 /*
  * Simple verification test of ftrace function tracer.
  * Enable ftrace, sleep 1/10 second, and then read the trace
@@ -252,7 +461,8 @@ trace_selftest_startup_function(struct tracer *trace, struct trace_array *tr)
 /* Maximum number of functions to trace before diagnosing a hang */
 #define GRAPH_MAX_FUNC_TEST	100000000
 
-static void __ftrace_dump(bool disable_tracing);
+static void
+__ftrace_dump(bool disable_tracing, enum ftrace_dump_mode oops_dump_mode);
 static unsigned int graph_hang_thresh;
 
 /* Wrap the real function entry probe to avoid possible hanging */
@@ -263,7 +473,7 @@ static int trace_graph_entry_watchdog(struct ftrace_graph_ent *trace)
 		ftrace_graph_stop();
 		printk(KERN_WARNING "BUG: Function graph tracer hang!\n");
 		if (ftrace_dump_on_oops)
-			__ftrace_dump(false);
+			__ftrace_dump(false, DUMP_ALL);
 		return 0;
 	}
 
@@ -286,6 +496,7 @@ trace_selftest_startup_function_graph(struct tracer *trace,
 	 * to detect and recover from possible hangs
 	 */
 	tracing_reset_online_cpus(tr);
+	set_graph_array(tr);
 	ret = register_ftrace_graph(&trace_graph_return,
 				    &trace_graph_entry_watchdog);
 	if (ret) {
@@ -555,7 +766,7 @@ trace_selftest_startup_nop(struct tracer *trace, struct trace_array *tr)
 static int trace_wakeup_test_thread(void *data)
 {
 	/* Make this a RT thread, doesn't need to be too high */
-	struct sched_param param = { .sched_priority = 5 };
+	static const struct sched_param param = { .sched_priority = 5 };
 	struct completion *x = data;
 
 	sched_setscheduler(current, SCHED_FIFO, &param);
@@ -686,38 +897,6 @@ trace_selftest_startup_sched_switch(struct tracer *trace, struct trace_array *tr
 }
 #endif /* CONFIG_CONTEXT_SWITCH_TRACER */
 
-#ifdef CONFIG_SYSPROF_TRACER
-int
-trace_selftest_startup_sysprof(struct tracer *trace, struct trace_array *tr)
-{
-	unsigned long count;
-	int ret;
-
-	/* start the tracing */
-	ret = tracer_init(trace, tr);
-	if (ret) {
-		warn_failed_init_tracer(trace, ret);
-		return ret;
-	}
-
-	/* Sleep for a 1/10 of a second */
-	msleep(100);
-	/* stop the tracing. */
-	tracing_stop();
-	/* check the trace buffer */
-	ret = trace_test_buffer(tr, &count);
-	trace->reset(tr);
-	tracing_start();
-
-	if (!ret && !count) {
-		printk(KERN_CONT ".. no entries found ..");
-		ret = -1;
-	}
-
-	return ret;
-}
-#endif /* CONFIG_SYSPROF_TRACER */
-
 #ifdef CONFIG_BRANCH_TRACER
 int
 trace_selftest_startup_branch(struct tracer *trace, struct trace_array *tr)
@@ -749,3 +928,4 @@ trace_selftest_startup_branch(struct tracer *trace, struct trace_array *tr)
 	return ret;
 }
 #endif /* CONFIG_BRANCH_TRACER */
+

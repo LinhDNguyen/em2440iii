@@ -28,39 +28,30 @@ COPYRIGHT:www.embedsky.net
 #include <asm/uaccess.h>
 #include <asm/atomic.h>
 #include <asm/unistd.h>
-
+#include <linux/mutex.h>
+#include <linux/gpio.h>
 
 #define DEVICE_NAME "GPIO-Control"
 
-/* 应用程序执行ioctl(fd, cmd, arg)时的第2个参数 */
 #define IOCTL_GPIO_ON	1
 #define IOCTL_GPIO_OFF	0
 
-/* 用来指定LED所用的GPIO引脚 */
-static unsigned long gpio_table [] =
+static DEFINE_MUTEX(tq2440btn_mutex);
+
+static unsigned int gpio_table [] =
 {
-	S3C2410_GPB5,
-	S3C2410_GPB6,
-	S3C2410_GPB7,
-	S3C2410_GPB8,
+	S3C2410_GPB(5),
+	S3C2410_GPB(6),
+	S3C2410_GPB(7),
+	S3C2410_GPB(8),
 };
 
-/* 用来指定GPIO引脚的功能：输出 */
-static unsigned int gpio_cfg_table [] =
-{
-	S3C2410_GPB5_OUTP,
-	S3C2410_GPB6_OUTP,
-	S3C2410_GPB7_OUTP,
-	S3C2410_GPB8_OUTP,
-};
-
-static int tq2440_gpio_ioctl(
-	struct inode *inode, 
+static long tq2440_gpio_ioctl( 
 	struct file *file, 
 	unsigned int cmd, 
 	unsigned long arg)
 {
-	if (arg > 4)
+	if (arg >= 4)
 	{
 		return -EINVAL;
 	}
@@ -68,13 +59,15 @@ static int tq2440_gpio_ioctl(
 	switch(cmd)
 	{
 		case IOCTL_GPIO_ON:
-			// 设置指定引脚的输出电平为0
-			s3c2410_gpio_setpin(gpio_table[arg], 0);
+			mutex_lock(&tq2440btn_mutex);
+			gpio_set_value(gpio_table[arg], 0);
+			mutex_unlock(&tq2440btn_mutex);
 			return 0;
 
 		case IOCTL_GPIO_OFF:
-			// 设置指定引脚的输出电平为1
-			s3c2410_gpio_setpin(gpio_table[arg], 1);
+			mutex_lock(&tq2440btn_mutex);
+			gpio_set_value(gpio_table[arg], 1);
+			mutex_unlock(&tq2440btn_mutex);
 			return 0;
 
 		default:
@@ -84,7 +77,7 @@ static int tq2440_gpio_ioctl(
 
 static struct file_operations dev_fops = {
 	.owner	=	THIS_MODULE,
-	.ioctl	=	tq2440_gpio_ioctl,
+	.unlocked_ioctl	=	tq2440_gpio_ioctl,
 };
 
 static struct miscdevice misc = {
@@ -101,8 +94,8 @@ static int __init dev_init(void)
 	
 	for (i = 0; i < 4; i++)
 	{
-		s3c2410_gpio_cfgpin(gpio_table[i], gpio_cfg_table[i]);
-		s3c2410_gpio_setpin(gpio_table[i], 0);
+		s3c_gpio_cfgpin(gpio_table[i], S3C_GPIO_OUTPUT);
+		gpio_set_value(gpio_table[i], 1);
 	}
 
 	ret = misc_register(&misc);

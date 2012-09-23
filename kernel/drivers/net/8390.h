@@ -9,6 +9,7 @@
 
 #include <linux/if_ether.h>
 #include <linux/ioport.h>
+#include <linux/irqreturn.h>
 #include <linux/skbuff.h>
 
 #define TX_PAGES 12	/* Two Tx slots */
@@ -40,7 +41,7 @@ extern int ei_open(struct net_device *dev);
 extern int ei_close(struct net_device *dev);
 extern irqreturn_t ei_interrupt(int irq, void *dev_id);
 extern void ei_tx_timeout(struct net_device *dev);
-extern int ei_start_xmit(struct sk_buff *skb, struct net_device *dev);
+extern netdev_tx_t ei_start_xmit(struct sk_buff *skb, struct net_device *dev);
 extern void ei_set_multicast_list(struct net_device *dev);
 extern struct net_device_stats *ei_get_stats(struct net_device *dev);
 
@@ -58,7 +59,7 @@ extern int eip_open(struct net_device *dev);
 extern int eip_close(struct net_device *dev);
 extern irqreturn_t eip_interrupt(int irq, void *dev_id);
 extern void eip_tx_timeout(struct net_device *dev);
-extern int eip_start_xmit(struct sk_buff *skb, struct net_device *dev);
+extern netdev_tx_t eip_start_xmit(struct sk_buff *skb, struct net_device *dev);
 extern void eip_set_multicast_list(struct net_device *dev);
 extern struct net_device_stats *eip_get_stats(struct net_device *dev);
 

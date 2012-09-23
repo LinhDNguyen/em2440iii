@@ -37,7 +37,6 @@
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
-#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <asm/io.h>
@@ -583,9 +582,10 @@ static void sca_dump_rings(struct net_device *dev)
 	       sca_in(DSR_RX(phy_node(port)), card), port->rxin,
 	       sca_in(DSR_RX(phy_node(port)), card) & DSR_DE ? "" : "in");
 	for (cnt = 0; cnt < port_to_card(port)->rx_ring_buffers; cnt++)
-		printk(" %02X", readb(&(desc_address(port, cnt, 0)->stat)));
+		pr_cont(" %02X", readb(&(desc_address(port, cnt, 0)->stat)));
+	pr_cont("\n");
 
-	printk("\n" KERN_DEBUG "TX ring: CDA=%u EDA=%u DSR=%02X in=%u "
+	printk(KERN_DEBUG "TX ring: CDA=%u EDA=%u DSR=%02X in=%u "
 	       "last=%u %sactive",
 	       sca_inw(get_dmac_tx(port) + CDAL, card),
 	       sca_inw(get_dmac_tx(port) + EDAL, card),
@@ -593,8 +593,8 @@ static void sca_dump_rings(struct net_device *dev)
 	       sca_in(DSR_TX(phy_node(port)), card) & DSR_DE ? "" : "in");
 
 	for (cnt = 0; cnt < port_to_card(port)->tx_ring_buffers; cnt++)
-		printk(" %02X", readb(&(desc_address(port, cnt, 1)->stat)));
-	printk("\n");
+		pr_cont(" %02X", readb(&(desc_address(port, cnt, 1)->stat)));
+	pr_cont("\n");
 
 	printk(KERN_DEBUG "MSCI: MD: %02x %02x %02x, ST: %02x %02x %02x %02x,"
 	       " FST: %02x CST: %02x %02x\n",
@@ -619,7 +619,7 @@ static void sca_dump_rings(struct net_device *dev)
 #endif /* DEBUG_RINGS */
 
 
-static int sca_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t sca_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	port_t *port = dev_to_port(dev);
 	card_t *card = port_to_card(port);
@@ -658,7 +658,6 @@ static int sca_xmit(struct sk_buff *skb, struct net_device *dev)
 #endif
 	writew(len, &desc->len);
 	writeb(ST_TX_EOM, &desc->stat);
-	dev->trans_start = jiffies;
 
 	port->txin = next_desc(port, port->txin, 1);
 	sca_outw(desc_offset(port, port->txin, 1),
@@ -673,7 +672,7 @@ static int sca_xmit(struct sk_buff *skb, struct net_device *dev)
 	spin_unlock_irq(&port->lock);
 
 	dev_kfree_skb(skb);
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 

@@ -22,40 +22,22 @@
 #include <asm/cacheflush.h>
 #include <asm/code-patching.h>
 #include <asm/ftrace.h>
+#include <asm/syscall.h>
 
-#ifdef CONFIG_PPC32
-# define GET_ADDR(addr) addr
-#else
-/* PowerPC64's functions are data that points to the functions */
-# define GET_ADDR(addr) (*(unsigned long *)addr)
-#endif
 
 #ifdef CONFIG_DYNAMIC_FTRACE
-static unsigned int ftrace_nop_replace(void)
-{
-	return PPC_INST_NOP;
-}
-
 static unsigned int
 ftrace_call_replace(unsigned long ip, unsigned long addr, int link)
 {
 	unsigned int op;
 
-	addr = GET_ADDR(addr);
+	addr = ppc_function_entry((void *)addr);
 
 	/* if (link) set op to 'bl' else 'b' */
 	op = create_branch((unsigned int *)ip, addr, link ? 1 : 0);
 
 	return op;
 }
-
-#ifdef CONFIG_PPC64
-# define _ASM_ALIGN	" .align 3 "
-# define _ASM_PTR	" .llong "
-#else
-# define _ASM_ALIGN	" .align 2 "
-# define _ASM_PTR	" .long "
-#endif
 
 static int
 ftrace_modify_code(unsigned long ip, unsigned int old, unsigned int new)
@@ -197,7 +179,7 @@ __ftrace_make_nop(struct module *mod,
 	ptr = ((unsigned long)jmp[0] << 32) + jmp[1];
 
 	/* This should match what was called */
-	if (ptr != GET_ADDR(addr)) {
+	if (ptr != ppc_function_entry((void *)addr)) {
 		printk(KERN_ERR "addr does not match %lx\n", ptr);
 		return -EINVAL;
 	}
@@ -328,7 +310,7 @@ int ftrace_make_nop(struct module *mod,
 	if (test_24bit_addr(ip, addr)) {
 		/* within range */
 		old = ftrace_call_replace(ip, addr, 1);
-		new = ftrace_nop_replace();
+		new = PPC_INST_NOP;
 		return ftrace_modify_code(ip, old, new);
 	}
 
@@ -466,7 +448,7 @@ int ftrace_make_call(struct dyn_ftrace *rec, unsigned long addr)
 	 */
 	if (test_24bit_addr(ip, addr)) {
 		/* within range */
-		old = ftrace_nop_replace();
+		old = PPC_INST_NOP;
 		new = ftrace_call_replace(ip, addr, 1);
 		return ftrace_modify_code(ip, old, new);
 	}
@@ -570,7 +552,7 @@ void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr)
 		return_hooker = (unsigned long)&mod_return_to_handler;
 #endif
 
-	return_hooker = GET_ADDR(return_hooker);
+	return_hooker = ppc_function_entry((void *)return_hooker);
 
 	/*
 	 * Protect against fault, even if it shouldn't
@@ -605,7 +587,7 @@ void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr)
 		return;
 	}
 
-	if (ftrace_push_return_trace(old, self_addr, &trace.depth) == -EBUSY) {
+	if (ftrace_push_return_trace(old, self_addr, &trace.depth, 0) == -EBUSY) {
 		*parent = old;
 		return;
 	}
@@ -619,3 +601,10 @@ void prepare_ftrace_return(unsigned long *parent, unsigned long self_addr)
 	}
 }
 #endif /* CONFIG_FUNCTION_GRAPH_TRACER */
+
+#if defined(CONFIG_FTRACE_SYSCALLS) && defined(CONFIG_PPC64)
+unsigned long __init arch_syscall_addr(int nr)
+{
+	return sys_call_table[nr*2];
+}
+#endif /* CONFIG_FTRACE_SYSCALLS && CONFIG_PPC64 */

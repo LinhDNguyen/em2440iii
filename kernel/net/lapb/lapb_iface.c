@@ -29,6 +29,7 @@
 #include <linux/inet.h>
 #include <linux/if_arp.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -299,26 +300,26 @@ int lapb_disconnect_request(struct net_device *dev)
 		goto out;
 
 	switch (lapb->state) {
-		case LAPB_STATE_0:
-			rc = LAPB_NOTCONNECTED;
-			goto out_put;
+	case LAPB_STATE_0:
+		rc = LAPB_NOTCONNECTED;
+		goto out_put;
 
-		case LAPB_STATE_1:
+	case LAPB_STATE_1:
 #if LAPB_DEBUG > 1
-			printk(KERN_DEBUG "lapb: (%p) S1 TX DISC(1)\n", lapb->dev);
+		printk(KERN_DEBUG "lapb: (%p) S1 TX DISC(1)\n", lapb->dev);
 #endif
 #if LAPB_DEBUG > 0
-			printk(KERN_DEBUG "lapb: (%p) S1 -> S0\n", lapb->dev);
+		printk(KERN_DEBUG "lapb: (%p) S1 -> S0\n", lapb->dev);
 #endif
-			lapb_send_control(lapb, LAPB_DISC, LAPB_POLLON, LAPB_COMMAND);
-			lapb->state = LAPB_STATE_0;
-			lapb_start_t1timer(lapb);
-			rc = LAPB_NOTCONNECTED;
-			goto out_put;
+		lapb_send_control(lapb, LAPB_DISC, LAPB_POLLON, LAPB_COMMAND);
+		lapb->state = LAPB_STATE_0;
+		lapb_start_t1timer(lapb);
+		rc = LAPB_NOTCONNECTED;
+		goto out_put;
 
-		case LAPB_STATE_2:
-			rc = LAPB_OK;
-			goto out_put;
+	case LAPB_STATE_2:
+		rc = LAPB_OK;
+		goto out_put;
 	}
 
 	lapb_clear_queues(lapb);
@@ -407,7 +408,7 @@ int lapb_data_indication(struct lapb_cb *lapb, struct sk_buff *skb)
 		return lapb->callbacks.data_indication(lapb->dev, skb);
 
 	kfree_skb(skb);
-	return NET_RX_CN_HIGH; /* For now; must be != NET_RX_DROP */
+	return NET_RX_SUCCESS; /* For now; must be != NET_RX_DROP */
 }
 
 int lapb_data_transmit(struct lapb_cb *lapb, struct sk_buff *skb)

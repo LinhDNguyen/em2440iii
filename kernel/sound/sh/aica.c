@@ -49,6 +49,7 @@ MODULE_AUTHOR("Adrian McMenamin <adrian@mcmen.demon.co.uk>");
 MODULE_DESCRIPTION("Dreamcast AICA sound (pcm) driver");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("{{Yamaha/SEGA, AICA}}");
+MODULE_FIRMWARE("aica_firmware.bin");
 
 /* module parameters */
 #define CARD_NAME "AICA"
@@ -187,7 +188,7 @@ static void spu_reset(void)
 	spu_memset(0, 0, 0x200000 / 4);
 	/* Put ARM7 in endless loop */
 	local_irq_save(flags);
-	ctrl_outl(0xea000002, SPU_MEMORY_BASE);
+	__raw_writel(0xea000002, SPU_MEMORY_BASE);
 	local_irq_restore(flags);
 	spu_enable();
 }
@@ -565,7 +566,7 @@ static int load_aica_firmware(void)
 	err = request_firmware(&fw_entry, "aica_firmware.bin", &pd->dev);
 	if (unlikely(err))
 		return err;
-	/* write firware into memory */
+	/* write firmware into memory */
 	spu_disable();
 	spu_memload(0, fw_entry->data, fw_entry->size);
 	spu_enable();
@@ -609,11 +610,11 @@ static int __devinit snd_aica_probe(struct platform_device *devptr)
 	dreamcastcard = kmalloc(sizeof(struct snd_card_aica), GFP_KERNEL);
 	if (unlikely(!dreamcastcard))
 		return -ENOMEM;
-	dreamcastcard->card =
-	    snd_card_new(index, SND_AICA_DRIVER, THIS_MODULE, 0);
-	if (unlikely(!dreamcastcard->card)) {
+	err = snd_card_create(index, SND_AICA_DRIVER, THIS_MODULE, 0,
+			      &dreamcastcard->card);
+	if (unlikely(err < 0)) {
 		kfree(dreamcastcard);
-		return -ENODEV;
+		return err;
 	}
 	strcpy(dreamcastcard->card->driver, "snd_aica");
 	strcpy(dreamcastcard->card->shortname, SND_AICA_DRIVER);

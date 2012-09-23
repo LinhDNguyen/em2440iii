@@ -32,6 +32,9 @@
 #include "control.h"
 #include "info.h"
 
+/* maximum number of devices on the AC97 bus */
+#define	AC97_BUS_MAX_DEVICES	4
+
 /*
  *  AC'97 codec registers
  */
@@ -93,6 +96,10 @@
 #define AC97_FUNC_INFO		0x68	/* Function Information */
 #define AC97_SENSE_INFO		0x6a	/* Sense Details */
 
+/* volume controls */
+#define AC97_MUTE_MASK_MONO	0x8000
+#define AC97_MUTE_MASK_STEREO	0x8080
+
 /* slot allocation */
 #define AC97_SLOT_TAG		0
 #define AC97_SLOT_CMD_ADDR	1
@@ -135,6 +142,7 @@
 #define AC97_BC_18BIT_ADC	0x0100	/* 18-bit ADC resolution */
 #define AC97_BC_20BIT_ADC	0x0200	/* 20-bit ADC resolution */
 #define AC97_BC_ADC_MASK	0x0300
+#define AC97_BC_3D_TECH_ID_MASK	0x7c00	/* Per-vendor ID of 3D enhancement */
 
 /* general purpose */
 #define AC97_GP_DRSS_MASK	0x0c00	/* double rate slot select */
@@ -377,7 +385,7 @@
 #define AC97_SCAP_DETECT_BY_VENDOR (1<<8) /* use vendor registers for read tests */
 #define AC97_SCAP_NO_SPDIF	(1<<9)	/* don't build SPDIF controls */
 #define AC97_SCAP_EAPD_LED	(1<<10)	/* EAPD as mute LED */
-#define AC97_SCAP_POWER_SAVE	(1<<11)	/* capable for aggresive power-saving */
+#define AC97_SCAP_POWER_SAVE	(1<<11)	/* capable for aggressive power-saving */
 
 /* ac97->flags */
 #define AC97_HAS_PC_BEEP	(1<<0)	/* force PC Speaker usage */
@@ -474,7 +482,7 @@ struct snd_ac97_template {
 
 struct snd_ac97 {
 	/* -- lowlevel (hardware) driver specific -- */
-	struct snd_ac97_build_ops * build_ops;
+	const struct snd_ac97_build_ops *build_ops;
 	void *private_data;
 	void (*private_free) (struct snd_ac97 *ac97);
 	/* --- */
@@ -590,7 +598,7 @@ enum {
 
 struct ac97_quirk {
 	unsigned short subvendor; /* PCI subsystem vendor id */
-	unsigned short subdevice; /* PCI sybsystem device id */
+	unsigned short subdevice; /* PCI subsystem device id */
 	unsigned short mask;	/* device id bit mask, 0 = accept all */
 	unsigned int codec_id;	/* codec id (if any), 0 = accept all */
 	const char *name;	/* name shown as info */
@@ -641,5 +649,11 @@ int snd_ac97_pcm_double_rate_rules(struct snd_pcm_runtime *runtime);
 
 /* ad hoc AC97 device driver access */
 extern struct bus_type ac97_bus_type;
+
+/* AC97 platform_data adding function */
+static inline void snd_ac97_dev_add_pdata(struct snd_ac97 *ac97, void *data)
+{
+	ac97->dev.platform_data = data;
+}
 
 #endif /* __SOUND_AC97_CODEC_H */

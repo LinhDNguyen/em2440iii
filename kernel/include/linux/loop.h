@@ -56,8 +56,7 @@ struct loop_device {
 	gfp_t		old_gfp_mask;
 
 	spinlock_t		lo_lock;
-	struct bio 		*lo_bio;
-	struct bio		*lo_biotail;
+	struct bio_list		lo_bio_list;
 	int			lo_state;
 	struct mutex		lo_ctl_mutex;
 	struct task_struct	*lo_thread;
@@ -65,7 +64,6 @@ struct loop_device {
 
 	struct request_queue	*lo_queue;
 	struct gendisk		*lo_disk;
-	struct list_head	lo_list;
 };
 
 #endif /* __KERNEL__ */
@@ -162,4 +160,8 @@ int loop_unregister_transfer(int number);
 #define LOOP_CHANGE_FD		0x4C06
 #define LOOP_SET_CAPACITY	0x4C07
 
+/* /dev/loop-control interface */
+#define LOOP_CTL_ADD		0x4C80
+#define LOOP_CTL_REMOVE		0x4C81
+#define LOOP_CTL_GET_FREE	0x4C82
 #endif

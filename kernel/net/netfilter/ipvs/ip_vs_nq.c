@@ -31,6 +31,9 @@
  *
  */
 
+#define KMSG_COMPONENT "IPVS"
+#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 
@@ -57,7 +60,7 @@ ip_vs_nq_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 	struct ip_vs_dest *dest, *least = NULL;
 	unsigned int loh = 0, doh;
 
-	IP_VS_DBG(6, "ip_vs_nq_schedule(): Scheduling...\n");
+	IP_VS_DBG(6, "%s(): Scheduling...\n", __func__);
 
 	/*
 	 * We calculate the load of each dest server as follows:
@@ -96,7 +99,7 @@ ip_vs_nq_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 	}
 
 	if (!least) {
-		IP_VS_ERR_RL("NQ: no destination available\n");
+		ip_vs_scheduler_err(svc, "no destination available");
 		return NULL;
 	}
 

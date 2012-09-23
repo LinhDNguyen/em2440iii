@@ -35,6 +35,7 @@
 #include <linux/kdev_t.h>
 #include <linux/etherdevice.h>
 #include <linux/usb.h>
+#include <linux/slab.h>
 
 #include "uwb-internal.h"
 
@@ -167,7 +168,7 @@ int uwb_rc_mac_addr_setup(struct uwb_rc *rc)
 	}
 
 	if (uwb_mac_addr_unset(&addr) || uwb_mac_addr_bcast(&addr)) {
-		addr.data[0] = 0x02; /* locally adminstered and unicast */
+		addr.data[0] = 0x02; /* locally administered and unicast */
 		get_random_bytes(&addr.data[1], sizeof(addr.data)-1);
 
 		result = uwb_rc_mac_addr_set(rc, &addr);
@@ -288,8 +289,8 @@ error_sys_add:
 error_dev_add:
 error_rc_setup:
 	rc->stop(rc);
-	uwbd_stop(rc);
 error_rc_start:
+	uwbd_stop(rc);
 	return result;
 }
 EXPORT_SYMBOL_GPL(uwb_rc_add);

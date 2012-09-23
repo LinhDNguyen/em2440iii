@@ -5,9 +5,11 @@
 #include <linux/smp.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/cpu.h>
 
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
+#include <asm/cache.h>
 #include <asm/apic.h>
 #include <asm/uv/uv.h>
 
@@ -40,16 +42,18 @@ union smp_flush_state {
 	struct {
 		struct mm_struct *flush_mm;
 		unsigned long flush_va;
-		spinlock_t tlbstate_lock;
+		raw_spinlock_t tlbstate_lock;
 		DECLARE_BITMAP(flush_cpumask, NR_CPUS);
 	};
-	char pad[CONFIG_X86_INTERNODE_CACHE_BYTES];
+	char pad[INTERNODE_CACHE_BYTES];
 } ____cacheline_internodealigned_in_smp;
 
 /* State is put into the per CPU data section, but padded
    to a full cache line because other CPUs can access it and we don't
    want false sharing in the per cpu data segment. */
 static union smp_flush_state flush_state[NUM_INVALIDATE_TLB_VECTORS];
+
+static DEFINE_PER_CPU_READ_MOSTLY(int, tlb_vector_offset);
 
 /*
  * We cannot call mmdrop() because we are in interrupt context,
@@ -59,7 +63,8 @@ void leave_mm(int cpu)
 {
 	if (percpu_read(cpu_tlbstate.state) == TLBSTATE_OK)
 		BUG();
-	cpu_clear(cpu, percpu_read(cpu_tlbstate.active_mm)->cpu_vm_mask);
+	cpumask_clear_cpu(cpu,
+			  mm_cpumask(percpu_read(cpu_tlbstate.active_mm)));
 	load_cr3(swapper_pg_dir);
 }
 EXPORT_SYMBOL_GPL(leave_mm);
@@ -171,34 +176,30 @@ static void flush_tlb_others_ipi(const struct cpumask *cpumask,
 	union smp_flush_state *f;
 
 	/* Caller has disabled preemption */
-	sender = smp_processor_id() % NUM_INVALIDATE_TLB_VECTORS;
+	sender = this_cpu_read(tlb_vector_offset);
 	f = &flush_state[sender];
 
-	/*
-	 * Could avoid this lock when
-	 * num_online_cpus() <= NUM_INVALIDATE_TLB_VECTORS, but it is
-	 * probably not worth checking this for a cache-hot lock.
-	 */
-	spin_lock(&f->tlbstate_lock);
+	if (nr_cpu_ids > NUM_INVALIDATE_TLB_VECTORS)
+		raw_spin_lock(&f->tlbstate_lock);
 
 	f->flush_mm = mm;
 	f->flush_va = va;
-	cpumask_andnot(to_cpumask(f->flush_cpumask),
-		       cpumask, cpumask_of(smp_processor_id()));
+	if (cpumask_andnot(to_cpumask(f->flush_cpumask), cpumask, cpumask_of(smp_processor_id()))) {
+		/*
+		 * We have to send the IPI only to
+		 * CPUs affected.
+		 */
+		apic->send_IPI_mask(to_cpumask(f->flush_cpumask),
+			      INVALIDATE_TLB_VECTOR_START + sender);
 
-	/*
-	 * We have to send the IPI only to
-	 * CPUs affected.
-	 */
-	apic->send_IPI_mask(to_cpumask(f->flush_cpumask),
-		      INVALIDATE_TLB_VECTOR_START + sender);
-
-	while (!cpumask_empty(to_cpumask(f->flush_cpumask)))
-		cpu_relax();
+		while (!cpumask_empty(to_cpumask(f->flush_cpumask)))
+			cpu_relax();
+	}
 
 	f->flush_mm = NULL;
 	f->flush_va = 0;
-	spin_unlock(&f->tlbstate_lock);
+	if (nr_cpu_ids > NUM_INVALIDATE_TLB_VECTORS)
+		raw_spin_unlock(&f->tlbstate_lock);
 }
 
 void native_flush_tlb_others(const struct cpumask *cpumask,
@@ -207,14 +208,55 @@ void native_flush_tlb_others(const struct cpumask *cpumask,
 	if (is_uv_system()) {
 		unsigned int cpu;
 
-		cpu = get_cpu();
+		cpu = smp_processor_id();
 		cpumask = uv_flush_tlb_others(cpumask, mm, va, cpu);
 		if (cpumask)
 			flush_tlb_others_ipi(cpumask, mm, va);
-		put_cpu();
 		return;
 	}
 	flush_tlb_others_ipi(cpumask, mm, va);
+}
+
+static void __cpuinit calculate_tlb_offset(void)
+{
+	int cpu, node, nr_node_vecs, idx = 0;
+	/*
+	 * we are changing tlb_vector_offset for each CPU in runtime, but this
+	 * will not cause inconsistency, as the write is atomic under X86. we
+	 * might see more lock contentions in a short time, but after all CPU's
+	 * tlb_vector_offset are changed, everything should go normal
+	 *
+	 * Note: if NUM_INVALIDATE_TLB_VECTORS % nr_online_nodes !=0, we might
+	 * waste some vectors.
+	 **/
+	if (nr_online_nodes > NUM_INVALIDATE_TLB_VECTORS)
+		nr_node_vecs = 1;
+	else
+		nr_node_vecs = NUM_INVALIDATE_TLB_VECTORS/nr_online_nodes;
+
+	for_each_online_node(node) {
+		int node_offset = (idx % NUM_INVALIDATE_TLB_VECTORS) *
+			nr_node_vecs;
+		int cpu_offset = 0;
+		for_each_cpu(cpu, cpumask_of_node(node)) {
+			per_cpu(tlb_vector_offset, cpu) = node_offset +
+				cpu_offset;
+			cpu_offset++;
+			cpu_offset = cpu_offset % nr_node_vecs;
+		}
+		idx++;
+	}
+}
+
+static int __cpuinit tlb_cpuhp_notify(struct notifier_block *n,
+		unsigned long action, void *hcpu)
+{
+	switch (action & 0xf) {
+	case CPU_ONLINE:
+	case CPU_DEAD:
+		calculate_tlb_offset();
+	}
+	return NOTIFY_OK;
 }
 
 static int __cpuinit init_smp_flush(void)
@@ -222,8 +264,10 @@ static int __cpuinit init_smp_flush(void)
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(flush_state); i++)
-		spin_lock_init(&flush_state[i].tlbstate_lock);
+		raw_spin_lock_init(&flush_state[i].tlbstate_lock);
 
+	calculate_tlb_offset();
+	hotcpu_notifier(tlb_cpuhp_notify, 0);
 	return 0;
 }
 core_initcall(init_smp_flush);
@@ -235,8 +279,8 @@ void flush_tlb_current_task(void)
 	preempt_disable();
 
 	local_flush_tlb();
-	if (cpumask_any_but(&mm->cpu_vm_mask, smp_processor_id()) < nr_cpu_ids)
-		flush_tlb_others(&mm->cpu_vm_mask, mm, TLB_FLUSH_ALL);
+	if (cpumask_any_but(mm_cpumask(mm), smp_processor_id()) < nr_cpu_ids)
+		flush_tlb_others(mm_cpumask(mm), mm, TLB_FLUSH_ALL);
 	preempt_enable();
 }
 
@@ -250,8 +294,8 @@ void flush_tlb_mm(struct mm_struct *mm)
 		else
 			leave_mm(smp_processor_id());
 	}
-	if (cpumask_any_but(&mm->cpu_vm_mask, smp_processor_id()) < nr_cpu_ids)
-		flush_tlb_others(&mm->cpu_vm_mask, mm, TLB_FLUSH_ALL);
+	if (cpumask_any_but(mm_cpumask(mm), smp_processor_id()) < nr_cpu_ids)
+		flush_tlb_others(mm_cpumask(mm), mm, TLB_FLUSH_ALL);
 
 	preempt_enable();
 }
@@ -269,19 +313,17 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long va)
 			leave_mm(smp_processor_id());
 	}
 
-	if (cpumask_any_but(&mm->cpu_vm_mask, smp_processor_id()) < nr_cpu_ids)
-		flush_tlb_others(&mm->cpu_vm_mask, mm, va);
+	if (cpumask_any_but(mm_cpumask(mm), smp_processor_id()) < nr_cpu_ids)
+		flush_tlb_others(mm_cpumask(mm), mm, va);
 
 	preempt_enable();
 }
 
 static void do_flush_tlb_all(void *info)
 {
-	unsigned long cpu = smp_processor_id();
-
 	__flush_tlb_all();
 	if (percpu_read(cpu_tlbstate.state) == TLBSTATE_LAZY)
-		leave_mm(cpu);
+		leave_mm(smp_processor_id());
 }
 
 void flush_tlb_all(void)

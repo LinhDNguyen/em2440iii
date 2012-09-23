@@ -243,8 +243,8 @@ struct es1938 {
 
 static irqreturn_t snd_es1938_interrupt(int irq, void *dev_id);
 
-static struct pci_device_id snd_es1938_ids[] = {
-        { 0x125d, 0x1969, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },   /* Solo-1 */
+static DEFINE_PCI_DEVICE_TABLE(snd_es1938_ids) = {
+	{ PCI_VDEVICE(ESS, 0x1969), 0, },   /* Solo-1 */
 	{ 0, }
 };
 
@@ -1387,7 +1387,7 @@ ES1938_DOUBLE_TLV("Aux Playback Volume", 0, 0x3a, 0x3a, 4, 0, 15, 0,
 		  db_scale_line),
 ES1938_DOUBLE_TLV("Capture Volume", 0, 0xb4, 0xb4, 4, 0, 15, 0,
 		  db_scale_capture),
-ES1938_SINGLE("PC Speaker Volume", 0, 0x3c, 0, 7, 0),
+ES1938_SINGLE("Beep Volume", 0, 0x3c, 0, 7, 0),
 ES1938_SINGLE("Record Monitor", 0, 0xa8, 3, 1, 0),
 ES1938_SINGLE("Capture Switch", 0, 0x1c, 4, 1, 1),
 {
@@ -1514,7 +1514,7 @@ static int es1938_resume(struct pci_dev *pci)
 	}
 
 	if (request_irq(pci->irq, snd_es1938_interrupt,
-			IRQF_SHARED, "ES1938", chip)) {
+			IRQF_SHARED, KBUILD_MODNAME, chip)) {
 		printk(KERN_ERR "es1938: unable to grab IRQ %d, "
 		       "disabling device\n", pci->irq);
 		snd_card_disconnect(card);
@@ -1608,8 +1608,8 @@ static int __devinit snd_es1938_create(struct snd_card *card,
 	if ((err = pci_enable_device(pci)) < 0)
 		return err;
         /* check, if we can restrict PCI DMA transfers to 24 bits */
-	if (pci_set_dma_mask(pci, DMA_24BIT_MASK) < 0 ||
-	    pci_set_consistent_dma_mask(pci, DMA_24BIT_MASK) < 0) {
+	if (pci_set_dma_mask(pci, DMA_BIT_MASK(24)) < 0 ||
+	    pci_set_consistent_dma_mask(pci, DMA_BIT_MASK(24)) < 0) {
 		snd_printk(KERN_ERR "architecture does not support 24bit PCI busmaster DMA\n");
 		pci_disable_device(pci);
                 return -ENXIO;
@@ -1636,7 +1636,7 @@ static int __devinit snd_es1938_create(struct snd_card *card,
 	chip->mpu_port = pci_resource_start(pci, 3);
 	chip->game_port = pci_resource_start(pci, 4);
 	if (request_irq(pci->irq, snd_es1938_interrupt, IRQF_SHARED,
-			"ES1938", chip)) {
+			KBUILD_MODNAME, chip)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_es1938_free(chip);
 		return -EBUSY;
@@ -1673,18 +1673,22 @@ static irqreturn_t snd_es1938_interrupt(int irq, void *dev_id)
 
 	status = inb(SLIO_REG(chip, IRQCONTROL));
 #if 0
-	printk("Es1938debug - interrupt status: =0x%x\n", status);
+	printk(KERN_DEBUG "Es1938debug - interrupt status: =0x%x\n", status);
 #endif
 	
 	/* AUDIO 1 */
 	if (status & 0x10) {
 #if 0
-                printk("Es1938debug - AUDIO channel 1 interrupt\n");
-		printk("Es1938debug - AUDIO channel 1 DMAC DMA count: %u\n",
+                printk(KERN_DEBUG
+		       "Es1938debug - AUDIO channel 1 interrupt\n");
+		printk(KERN_DEBUG
+		       "Es1938debug - AUDIO channel 1 DMAC DMA count: %u\n",
 		       inw(SLDM_REG(chip, DMACOUNT)));
-		printk("Es1938debug - AUDIO channel 1 DMAC DMA base: %u\n",
+		printk(KERN_DEBUG
+		       "Es1938debug - AUDIO channel 1 DMAC DMA base: %u\n",
 		       inl(SLDM_REG(chip, DMAADDR)));
-		printk("Es1938debug - AUDIO channel 1 DMAC DMA status: 0x%x\n",
+		printk(KERN_DEBUG
+		       "Es1938debug - AUDIO channel 1 DMAC DMA status: 0x%x\n",
 		       inl(SLDM_REG(chip, DMASTATUS)));
 #endif
 		/* clear irq */
@@ -1699,10 +1703,13 @@ static irqreturn_t snd_es1938_interrupt(int irq, void *dev_id)
 	/* AUDIO 2 */
 	if (status & 0x20) {
 #if 0
-                printk("Es1938debug - AUDIO channel 2 interrupt\n");
-		printk("Es1938debug - AUDIO channel 2 DMAC DMA count: %u\n",
+                printk(KERN_DEBUG
+		       "Es1938debug - AUDIO channel 2 interrupt\n");
+		printk(KERN_DEBUG
+		       "Es1938debug - AUDIO channel 2 DMAC DMA count: %u\n",
 		       inw(SLIO_REG(chip, AUDIO2DMACOUNT)));
-		printk("Es1938debug - AUDIO channel 2 DMAC DMA base: %u\n",
+		printk(KERN_DEBUG
+		       "Es1938debug - AUDIO channel 2 DMAC DMA base: %u\n",
 		       inl(SLIO_REG(chip, AUDIO2DMAADDR)));
 
 #endif
@@ -1799,9 +1806,9 @@ static int __devinit snd_es1938_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 	for (idx = 0; idx < 5; idx++) {
 		if (pci_resource_start(pci, idx) == 0 ||
 		    !(pci_resource_flags(pci, idx) & IORESOURCE_IO)) {
@@ -1875,7 +1882,7 @@ static void __devexit snd_es1938_remove(struct pci_dev *pci)
 }
 
 static struct pci_driver driver = {
-	.name = "ESS ES1938 (Solo-1)",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_es1938_ids,
 	.probe = snd_es1938_probe,
 	.remove = __devexit_p(snd_es1938_remove),

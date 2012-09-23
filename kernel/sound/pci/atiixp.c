@@ -286,17 +286,18 @@ struct atiixp {
 
 /*
  */
-static struct pci_device_id snd_atiixp_ids[] = {
-	{ 0x1002, 0x4341, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 }, /* SB200 */
-	{ 0x1002, 0x4361, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 }, /* SB300 */
-	{ 0x1002, 0x4370, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 }, /* SB400 */
-	{ 0x1002, 0x4382, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 }, /* SB600 */
+static DEFINE_PCI_DEVICE_TABLE(snd_atiixp_ids) = {
+	{ PCI_VDEVICE(ATI, 0x4341), 0 }, /* SB200 */
+	{ PCI_VDEVICE(ATI, 0x4361), 0 }, /* SB300 */
+	{ PCI_VDEVICE(ATI, 0x4370), 0 }, /* SB400 */
+	{ PCI_VDEVICE(ATI, 0x4382), 0 }, /* SB600 */
 	{ 0, }
 };
 
 MODULE_DEVICE_TABLE(pci, snd_atiixp_ids);
 
 static struct snd_pci_quirk atiixp_quirks[] __devinitdata = {
+	SND_PCI_QUIRK(0x105b, 0x0c81, "Foxconn RC4107MA-RS2", 0),
 	SND_PCI_QUIRK(0x15bd, 0x3100, "DFI RS482", 0),
 	{ } /* terminator */
 };
@@ -521,7 +522,7 @@ static int snd_atiixp_aclink_reset(struct atiixp *chip)
 		atiixp_read(chip, CMD);
 		mdelay(1);
 		atiixp_update(chip, CMD, ATI_REG_CMD_AC_RESET, ATI_REG_CMD_AC_RESET);
-		if (--timeout) {
+		if (!--timeout) {
 			snd_printk(KERN_ERR "atiixp: codec reset timeout\n");
 			break;
 		}
@@ -1393,6 +1394,12 @@ static struct ac97_quirk ac97_quirks[] __devinitdata = {
 		.name = "HP nx6125",
 		.type = AC97_TUNE_MUTE_LED
 	},
+	{
+		.subvendor = 0x103c,
+		.subdevice = 0x3091,
+		.name = "unknown HP",
+		.type = AC97_TUNE_MUTE_LED
+	},
 	{ } /* terminator */
 };
 
@@ -1617,7 +1624,7 @@ static int __devinit snd_atiixp_create(struct snd_card *card,
 	}
 
 	if (request_irq(pci->irq, snd_atiixp_interrupt, IRQF_SHARED,
-			card->shortname, chip)) {
+			KBUILD_MODNAME, chip)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_atiixp_free(chip);
 		return -EBUSY;
@@ -1645,9 +1652,9 @@ static int __devinit snd_atiixp_probe(struct pci_dev *pci,
 	struct atiixp *chip;
 	int err;
 
-	card = snd_card_new(index, id, THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index, id, THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	strcpy(card->driver, spdif_aclink ? "ATIIXP" : "ATIIXP-SPDMA");
 	strcpy(card->shortname, "ATI IXP");
@@ -1694,7 +1701,7 @@ static void __devexit snd_atiixp_remove(struct pci_dev *pci)
 }
 
 static struct pci_driver driver = {
-	.name = "ATI IXP AC97 controller",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_atiixp_ids,
 	.probe = snd_atiixp_probe,
 	.remove = __devexit_p(snd_atiixp_remove),

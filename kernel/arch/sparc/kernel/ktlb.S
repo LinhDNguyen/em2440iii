@@ -47,16 +47,16 @@ kvmap_itlb_tsb_miss:
 kvmap_itlb_vmalloc_addr:
 	KERN_PGTABLE_WALK(%g4, %g5, %g2, kvmap_itlb_longpath)
 
-	KTSB_LOCK_TAG(%g1, %g2, %g7)
+	TSB_LOCK_TAG(%g1, %g2, %g7)
 
 	/* Load and check PTE.  */
 	ldxa		[%g5] ASI_PHYS_USE_EC, %g5
 	mov		1, %g7
 	sllx		%g7, TSB_TAG_INVALID_BIT, %g7
 	brgez,a,pn	%g5, kvmap_itlb_longpath
-	 KTSB_STORE(%g1, %g7)
+	 TSB_STORE(%g1, %g7)
 
-	KTSB_WRITE(%g1, %g5, %g6)
+	TSB_WRITE(%g1, %g5, %g6)
 
 	/* fallthrough to TLB load */
 
@@ -102,9 +102,9 @@ kvmap_itlb_longpath:
 kvmap_itlb_obp:
 	OBP_TRANS_LOOKUP(%g4, %g5, %g2, %g3, kvmap_itlb_longpath)
 
-	KTSB_LOCK_TAG(%g1, %g2, %g7)
+	TSB_LOCK_TAG(%g1, %g2, %g7)
 
-	KTSB_WRITE(%g1, %g5, %g6)
+	TSB_WRITE(%g1, %g5, %g6)
 
 	ba,pt		%xcc, kvmap_itlb_load
 	 nop
@@ -112,17 +112,17 @@ kvmap_itlb_obp:
 kvmap_dtlb_obp:
 	OBP_TRANS_LOOKUP(%g4, %g5, %g2, %g3, kvmap_dtlb_longpath)
 
-	KTSB_LOCK_TAG(%g1, %g2, %g7)
+	TSB_LOCK_TAG(%g1, %g2, %g7)
 
-	KTSB_WRITE(%g1, %g5, %g6)
+	TSB_WRITE(%g1, %g5, %g6)
 
 	ba,pt		%xcc, kvmap_dtlb_load
 	 nop
 
 	.align		32
 kvmap_dtlb_tsb4m_load:
-	KTSB_LOCK_TAG(%g1, %g2, %g7)
-	KTSB_WRITE(%g1, %g5, %g6)
+	TSB_LOCK_TAG(%g1, %g2, %g7)
+	TSB_WRITE(%g1, %g5, %g6)
 	ba,pt		%xcc, kvmap_dtlb_load
 	 nop
 
@@ -151,12 +151,46 @@ kvmap_dtlb_4v:
 	 * Must preserve %g1 and %g6 (TAG).
 	 */
 kvmap_dtlb_tsb4m_miss:
-	sethi		%hi(kpte_linear_bitmap), %g2
+	/* Clear the PAGE_OFFSET top virtual bits, shift
+	 * down to get PFN, and make sure PFN is in range.
+	 */
+	sllx		%g4, 21, %g5
+
+	/* Check to see if we know about valid memory at the 4MB
+	 * chunk this physical address will reside within.
+	 */
+	srlx		%g5, 21 + 41, %g2
+	brnz,pn		%g2, kvmap_dtlb_longpath
+	 nop
+
+	/* This unconditional branch and delay-slot nop gets patched
+	 * by the sethi sequence once the bitmap is properly setup.
+	 */
+	.globl		valid_addr_bitmap_insn
+valid_addr_bitmap_insn:
+	ba,pt		%xcc, 2f
+	 nop
+	.subsection	2
+	.globl		valid_addr_bitmap_patch
+valid_addr_bitmap_patch:
+	sethi		%hi(sparc64_valid_addr_bitmap), %g7
+	or		%g7, %lo(sparc64_valid_addr_bitmap), %g7
+	.previous
+
+	srlx		%g5, 21 + 22, %g2
+	srlx		%g2, 6, %g5
+	and		%g2, 63, %g2
+	sllx		%g5, 3, %g5
+	ldx		[%g7 + %g5], %g5
+	mov		1, %g7
+	sllx		%g7, %g2, %g7
+	andcc		%g5, %g7, %g0
+	be,pn		%xcc, kvmap_dtlb_longpath
+
+2:	 sethi		%hi(kpte_linear_bitmap), %g2
 	or		%g2, %lo(kpte_linear_bitmap), %g2
 
-	/* Clear the PAGE_OFFSET top virtual bits, then shift
-	 * down to get a 256MB physical address index.
-	 */
+	/* Get the 256MB physical address index. */
 	sllx		%g4, 21, %g5
 	mov		1, %g7
 	srlx		%g5, 21 + 28, %g5
@@ -188,16 +222,16 @@ kvmap_linear_patch:
 kvmap_dtlb_vmalloc_addr:
 	KERN_PGTABLE_WALK(%g4, %g5, %g2, kvmap_dtlb_longpath)
 
-	KTSB_LOCK_TAG(%g1, %g2, %g7)
+	TSB_LOCK_TAG(%g1, %g2, %g7)
 
 	/* Load and check PTE.  */
 	ldxa		[%g5] ASI_PHYS_USE_EC, %g5
 	mov		1, %g7
 	sllx		%g7, TSB_TAG_INVALID_BIT, %g7
 	brgez,a,pn	%g5, kvmap_dtlb_longpath
-	 KTSB_STORE(%g1, %g7)
+	 TSB_STORE(%g1, %g7)
 
-	KTSB_WRITE(%g1, %g5, %g6)
+	TSB_WRITE(%g1, %g5, %g6)
 
 	/* fallthrough to TLB load */
 
@@ -246,8 +280,8 @@ kvmap_dtlb_nonlinear:
 
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
 	/* Do not use the TSB for vmemmap.  */
-	mov		(VMEMMAP_BASE >> 24), %g5
-	sllx		%g5, 24, %g5
+	mov		(VMEMMAP_BASE >> 40), %g5
+	sllx		%g5, 40, %g5
 	cmp		%g4,%g5
 	bgeu,pn		%xcc, kvmap_vmemmap
 	 nop
@@ -259,8 +293,8 @@ kvmap_dtlb_tsbmiss:
 	sethi		%hi(MODULES_VADDR), %g5
 	cmp		%g4, %g5
 	blu,pn		%xcc, kvmap_dtlb_longpath
-	 mov		(VMALLOC_END >> 24), %g5
-	sllx		%g5, 24, %g5
+	 mov		(VMALLOC_END >> 40), %g5
+	sllx		%g5, 40, %g5
 	cmp		%g4, %g5
 	bgeu,pn		%xcc, kvmap_dtlb_longpath
 	 nop

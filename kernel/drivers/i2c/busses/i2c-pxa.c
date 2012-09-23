@@ -12,7 +12,7 @@
  *
  *  History:
  *    Apr 2002: Initial version [CS]
- *    Jun 2002: Properly seperated algo/adap [FB]
+ *    Jun 2002: Properly separated algo/adap [FB]
  *    Jan 2003: Fixed several bugs concerning interrupt handling [Kai-Uwe Bloem]
  *    Jan 2003: added limited signal handling [Kai-Uwe Bloem]
  *    Sep 2004: Major rework to ensure efficient bus handling [RMK]
@@ -22,7 +22,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/i2c.h>
-#include <linux/i2c-id.h>
 #include <linux/init.h>
 #include <linux/time.h>
 #include <linux/sched.h>
@@ -30,23 +29,75 @@
 #include <linux/errno.h>
 #include <linux/interrupt.h>
 #include <linux/i2c-pxa.h>
+#include <linux/of_i2c.h>
 #include <linux/platform_device.h>
 #include <linux/err.h>
 #include <linux/clk.h>
+#include <linux/slab.h>
+#include <linux/io.h>
+#include <linux/i2c/pxa-i2c.h>
 
-#include <mach/hardware.h>
 #include <asm/irq.h>
-#include <asm/io.h>
-#include <mach/i2c.h>
+
+#ifndef CONFIG_HAVE_CLK
+#define clk_get(dev, id)	NULL
+#define clk_put(clk)		do { } while (0)
+#define clk_disable(clk)	do { } while (0)
+#define clk_enable(clk)		do { } while (0)
+#endif
+
+struct pxa_reg_layout {
+	u32 ibmr;
+	u32 idbr;
+	u32 icr;
+	u32 isr;
+	u32 isar;
+};
+
+enum pxa_i2c_types {
+	REGS_PXA2XX,
+	REGS_PXA3XX,
+	REGS_CE4100,
+};
 
 /*
- * I2C registers and bit definitions
+ * I2C registers definitions
  */
-#define IBMR		(0x00)
-#define IDBR		(0x08)
-#define ICR		(0x10)
-#define ISR		(0x18)
-#define ISAR		(0x20)
+static struct pxa_reg_layout pxa_reg_layout[] = {
+	[REGS_PXA2XX] = {
+		.ibmr =	0x00,
+		.idbr =	0x08,
+		.icr =	0x10,
+		.isr =	0x18,
+		.isar =	0x20,
+	},
+	[REGS_PXA3XX] = {
+		.ibmr =	0x00,
+		.idbr =	0x04,
+		.icr =	0x08,
+		.isr =	0x0c,
+		.isar =	0x10,
+	},
+	[REGS_CE4100] = {
+		.ibmr =	0x14,
+		.idbr =	0x0c,
+		.icr =	0x00,
+		.isr =	0x04,
+		/* no isar register */
+	},
+};
+
+static const struct platform_device_id i2c_pxa_id_table[] = {
+	{ "pxa2xx-i2c",		REGS_PXA2XX },
+	{ "pxa3xx-pwri2c",	REGS_PXA3XX },
+	{ "ce4100-i2c",		REGS_CE4100 },
+	{ },
+};
+MODULE_DEVICE_TABLE(platform, i2c_pxa_id_table);
+
+/*
+ * I2C bit definitions
+ */
 
 #define ICR_START	(1 << 0)	   /* start bit */
 #define ICR_STOP	(1 << 1)	   /* stop bit */
@@ -97,7 +148,11 @@ struct pxa_i2c {
 	u32			icrlog[32];
 
 	void __iomem		*reg_base;
-	unsigned int		reg_shift;
+	void __iomem		*reg_ibmr;
+	void __iomem		*reg_idbr;
+	void __iomem		*reg_icr;
+	void __iomem		*reg_isr;
+	void __iomem		*reg_isar;
 
 	unsigned long		iobase;
 	unsigned long		iosize;
@@ -107,11 +162,11 @@ struct pxa_i2c {
 	unsigned int		fast_mode :1;
 };
 
-#define _IBMR(i2c)	((i2c)->reg_base + (0x0 << (i2c)->reg_shift))
-#define _IDBR(i2c)	((i2c)->reg_base + (0x4 << (i2c)->reg_shift))
-#define _ICR(i2c)	((i2c)->reg_base + (0x8 << (i2c)->reg_shift))
-#define _ISR(i2c)	((i2c)->reg_base + (0xc << (i2c)->reg_shift))
-#define _ISAR(i2c)	((i2c)->reg_base + (0x10 << (i2c)->reg_shift))
+#define _IBMR(i2c)	((i2c)->reg_ibmr)
+#define _IDBR(i2c)	((i2c)->reg_idbr)
+#define _ICR(i2c)	((i2c)->reg_icr)
+#define _ISR(i2c)	((i2c)->reg_isr)
+#define _ISAR(i2c)	((i2c)->reg_isar)
 
 /*
  * I2C Slave mode address
@@ -194,18 +249,6 @@ static void i2c_pxa_show_state(struct pxa_i2c *i2c, int lno, const char *fname)
 }
 
 #define show_state(i2c) i2c_pxa_show_state(i2c, __LINE__, __func__)
-#else
-#define i2c_debug	0
-
-#define show_state(i2c) do { } while (0)
-#define decode_ISR(val) do { } while (0)
-#define decode_ICR(val) do { } while (0)
-#endif
-
-#define eedbg(lvl, x...) do { if ((lvl) < 1) { printk(KERN_DEBUG "" x); } } while(0)
-
-static void i2c_pxa_master_complete(struct pxa_i2c *i2c, int ret);
-static irqreturn_t i2c_pxa_handler(int this_irq, void *dev_id);
 
 static void i2c_pxa_scream_blue_murder(struct pxa_i2c *i2c, const char *why)
 {
@@ -220,6 +263,20 @@ static void i2c_pxa_scream_blue_murder(struct pxa_i2c *i2c, const char *why)
 		printk("[%08x:%08x] ", i2c->isrlog[i], i2c->icrlog[i]);
 	printk("\n");
 }
+
+#else /* ifdef DEBUG */
+
+#define i2c_debug	0
+
+#define show_state(i2c) do { } while (0)
+#define decode_ISR(val) do { } while (0)
+#define decode_ICR(val) do { } while (0)
+#define i2c_pxa_scream_blue_murder(i2c, why) do { } while (0)
+
+#endif /* ifdef DEBUG / else */
+
+static void i2c_pxa_master_complete(struct pxa_i2c *i2c, int ret);
+static irqreturn_t i2c_pxa_handler(int this_irq, void *dev_id);
 
 static inline int i2c_pxa_is_slavemode(struct pxa_i2c *i2c)
 {
@@ -402,7 +459,8 @@ static void i2c_pxa_reset(struct pxa_i2c *i2c)
 	writel(I2C_ISR_INIT, _ISR(i2c));
 	writel(readl(_ICR(i2c)) & ~ICR_UR, _ICR(i2c));
 
-	writel(i2c->slave_addr, _ISAR(i2c));
+	if (i2c->reg_isar)
+		writel(i2c->slave_addr, _ISAR(i2c));
 
 	/* set control register values */
 	writel(I2C_ICR_INIT | (i2c->fast_mode ? ICR_FM : 0), _ICR(i2c));
@@ -713,8 +771,10 @@ static int i2c_pxa_do_xfer(struct pxa_i2c *i2c, struct i2c_msg *msg, int num)
 	 */
 	ret = i2c->msg_idx;
 
-	if (timeout == 0)
+	if (!timeout && i2c->msg_num) {
 		i2c_pxa_scream_blue_murder(i2c, "timeout");
+		ret = I2C_RETRY;
+	}
 
  out:
 	return ret;
@@ -899,10 +959,15 @@ static void i2c_pxa_irq_rxfull(struct pxa_i2c *i2c, u32 isr)
 	writel(icr, _ICR(i2c));
 }
 
+#define VALID_INT_SOURCE	(ISR_SSD | ISR_ALD | ISR_ITE | ISR_IRF | \
+				ISR_SAD | ISR_BED)
 static irqreturn_t i2c_pxa_handler(int this_irq, void *dev_id)
 {
 	struct pxa_i2c *i2c = dev_id;
 	u32 isr = readl(_ISR(i2c));
+
+	if (!(isr & VALID_INT_SOURCE))
+		return IRQ_NONE;
 
 	if (i2c_debug > 2 && 0) {
 		dev_dbg(&i2c->adap.dev, "%s: ISR=%08x, ICR=%08x, IBMR=%02x\n",
@@ -918,7 +983,7 @@ static irqreturn_t i2c_pxa_handler(int this_irq, void *dev_id)
 	/*
 	 * Always clear all pending IRQs.
 	 */
-	writel(isr & (ISR_SSD|ISR_ALD|ISR_ITE|ISR_IRF|ISR_SAD|ISR_BED), _ISR(i2c));
+	writel(isr & VALID_INT_SOURCE, _ISR(i2c));
 
 	if (isr & ISR_SAD)
 		i2c_pxa_slave_start(i2c, isr);
@@ -979,12 +1044,13 @@ static const struct i2c_algorithm i2c_pxa_pio_algorithm = {
 	.functionality	= i2c_pxa_functionality,
 };
 
-#define res_len(r)		((r)->end - (r)->start + 1)
 static int i2c_pxa_probe(struct platform_device *dev)
 {
 	struct pxa_i2c *i2c;
 	struct resource *res;
 	struct i2c_pxa_platform_data *plat = dev->dev.platform_data;
+	const struct platform_device_id *id = platform_get_device_id(dev);
+	enum pxa_i2c_types i2c_type = id->driver_data;
 	int ret;
 	int irq;
 
@@ -993,7 +1059,7 @@ static int i2c_pxa_probe(struct platform_device *dev)
 	if (res == NULL || irq < 0)
 		return -ENODEV;
 
-	if (!request_mem_region(res->start, res_len(res), res->name))
+	if (!request_mem_region(res->start, resource_size(res), res->name))
 		return -ENOMEM;
 
 	i2c = kzalloc(sizeof(struct pxa_i2c), GFP_KERNEL);
@@ -1013,7 +1079,7 @@ static int i2c_pxa_probe(struct platform_device *dev)
 	 * The reason to do so is to avoid sysfs names that only make
 	 * sense when there are multiple adapters.
 	 */
-	i2c->adap.nr = dev->id != -1 ? dev->id : 0;
+	i2c->adap.nr = dev->id;
 	snprintf(i2c->adap.name, sizeof(i2c->adap.name), "pxa_i2c-i2c.%u",
 		 i2c->adap.nr);
 
@@ -1023,15 +1089,21 @@ static int i2c_pxa_probe(struct platform_device *dev)
 		goto eclk;
 	}
 
-	i2c->reg_base = ioremap(res->start, res_len(res));
+	i2c->reg_base = ioremap(res->start, resource_size(res));
 	if (!i2c->reg_base) {
 		ret = -EIO;
 		goto eremap;
 	}
-	i2c->reg_shift = (cpu_is_pxa3xx() && (dev->id == 1)) ? 0 : 1;
+
+	i2c->reg_ibmr = i2c->reg_base + pxa_reg_layout[i2c_type].ibmr;
+	i2c->reg_idbr = i2c->reg_base + pxa_reg_layout[i2c_type].idbr;
+	i2c->reg_icr = i2c->reg_base + pxa_reg_layout[i2c_type].icr;
+	i2c->reg_isr = i2c->reg_base + pxa_reg_layout[i2c_type].isr;
+	if (i2c_type != REGS_CE4100)
+		i2c->reg_isar = i2c->reg_base + pxa_reg_layout[i2c_type].isar;
 
 	i2c->iobase = res->start;
-	i2c->iosize = res_len(res);
+	i2c->iosize = resource_size(res);
 
 	i2c->irq = irq;
 
@@ -1056,7 +1128,7 @@ static int i2c_pxa_probe(struct platform_device *dev)
 		i2c->adap.algo = &i2c_pxa_pio_algorithm;
 	} else {
 		i2c->adap.algo = &i2c_pxa_algorithm;
-		ret = request_irq(irq, i2c_pxa_handler, IRQF_DISABLED,
+		ret = request_irq(irq, i2c_pxa_handler, IRQF_SHARED,
 				  i2c->adap.name, i2c);
 		if (ret)
 			goto ereqirq;
@@ -1066,12 +1138,16 @@ static int i2c_pxa_probe(struct platform_device *dev)
 
 	i2c->adap.algo_data = i2c;
 	i2c->adap.dev.parent = &dev->dev;
+#ifdef CONFIG_OF
+	i2c->adap.dev.of_node = dev->dev.of_node;
+#endif
 
 	ret = i2c_add_numbered_adapter(&i2c->adap);
 	if (ret < 0) {
 		printk(KERN_INFO "I2C: Failed to add bus\n");
 		goto eadapt;
 	}
+	of_i2c_register_devices(&i2c->adap);
 
 	platform_set_drvdata(dev, i2c);
 
@@ -1095,7 +1171,7 @@ eremap:
 eclk:
 	kfree(i2c);
 emalloc:
-	release_mem_region(res->start, res_len(res));
+	release_mem_region(res->start, resource_size(res));
 	return ret;
 }
 
@@ -1120,36 +1196,46 @@ static int __exit i2c_pxa_remove(struct platform_device *dev)
 }
 
 #ifdef CONFIG_PM
-static int i2c_pxa_suspend_late(struct platform_device *dev, pm_message_t state)
+static int i2c_pxa_suspend_noirq(struct device *dev)
 {
-	struct pxa_i2c *i2c = platform_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct pxa_i2c *i2c = platform_get_drvdata(pdev);
+
 	clk_disable(i2c->clk);
+
 	return 0;
 }
 
-static int i2c_pxa_resume_early(struct platform_device *dev)
+static int i2c_pxa_resume_noirq(struct device *dev)
 {
-	struct pxa_i2c *i2c = platform_get_drvdata(dev);
+	struct platform_device *pdev = to_platform_device(dev);
+	struct pxa_i2c *i2c = platform_get_drvdata(pdev);
 
 	clk_enable(i2c->clk);
 	i2c_pxa_reset(i2c);
 
 	return 0;
 }
+
+static const struct dev_pm_ops i2c_pxa_dev_pm_ops = {
+	.suspend_noirq = i2c_pxa_suspend_noirq,
+	.resume_noirq = i2c_pxa_resume_noirq,
+};
+
+#define I2C_PXA_DEV_PM_OPS (&i2c_pxa_dev_pm_ops)
 #else
-#define i2c_pxa_suspend_late NULL
-#define i2c_pxa_resume_early NULL
+#define I2C_PXA_DEV_PM_OPS NULL
 #endif
 
 static struct platform_driver i2c_pxa_driver = {
 	.probe		= i2c_pxa_probe,
 	.remove		= __exit_p(i2c_pxa_remove),
-	.suspend_late	= i2c_pxa_suspend_late,
-	.resume_early	= i2c_pxa_resume_early,
 	.driver		= {
 		.name	= "pxa2xx-i2c",
 		.owner	= THIS_MODULE,
+		.pm	= I2C_PXA_DEV_PM_OPS,
 	},
+	.id_table	= i2c_pxa_id_table,
 };
 
 static int __init i2c_adap_pxa_init(void)

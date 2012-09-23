@@ -1,3 +1,4 @@
+#include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/bitops.h>
 #include <linux/cpumask.h>
@@ -29,7 +30,7 @@ int __any_online_cpu(const cpumask_t *mask)
 {
 	int cpu;
 
-	for_each_cpu_mask(cpu, *mask) {
+	for_each_cpu(cpu, mask) {
 		if (cpu_online(cpu))
 			break;
 	}
@@ -92,15 +93,8 @@ int cpumask_any_but(const struct cpumask *mask, unsigned int cpu)
  */
 bool alloc_cpumask_var_node(cpumask_var_t *mask, gfp_t flags, int node)
 {
-	if (likely(slab_is_available()))
-		*mask = kmalloc_node(cpumask_size(), flags, node);
-	else {
-#ifdef CONFIG_DEBUG_PER_CPU_MAPS
-		printk(KERN_ERR
-			"=> alloc_cpumask_var: kmalloc not available!\n");
-#endif
-		*mask = NULL;
-	}
+	*mask = kmalloc_node(cpumask_size(), flags, node);
+
 #ifdef CONFIG_DEBUG_PER_CPU_MAPS
 	if (!*mask) {
 		printk(KERN_ERR "=> alloc_cpumask_var: failed!\n");
@@ -137,7 +131,7 @@ EXPORT_SYMBOL(zalloc_cpumask_var_node);
  */
 bool alloc_cpumask_var(cpumask_var_t *mask, gfp_t flags)
 {
-	return alloc_cpumask_var_node(mask, flags, numa_node_id());
+	return alloc_cpumask_var_node(mask, flags, NUMA_NO_NODE);
 }
 EXPORT_SYMBOL(alloc_cpumask_var);
 

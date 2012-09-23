@@ -21,6 +21,7 @@
 /* This file included from pcm_native.c */
 
 #include <linux/compat.h>
+#include <linux/slab.h>
 
 static int snd_pcm_ioctl_delay_compat(struct snd_pcm_substream *substream,
 				      s32 __user *src)
@@ -232,14 +233,11 @@ static int snd_pcm_ioctl_hw_params_compat(struct snd_pcm_substream *substream,
 	if (! (runtime = substream->runtime))
 		return -ENOTTY;
 
-	data = kmalloc(sizeof(*data), GFP_KERNEL);
-	if (data == NULL)
-		return -ENOMEM;
 	/* only fifo_size is different, so just copy all */
-	if (copy_from_user(data, data32, sizeof(*data32))) {
-		err = -EFAULT;
-		goto error;
-	}
+	data = memdup_user(data32, sizeof(*data32));
+	if (IS_ERR(data))
+		return PTR_ERR(data);
+
 	if (refine)
 		err = snd_pcm_hw_refine(substream, data);
 	else
@@ -344,7 +342,7 @@ static int snd_pcm_ioctl_xfern_compat(struct snd_pcm_substream *substream,
 			kfree(bufs);
 			return -EFAULT;
 		}
-		bufs[ch] = compat_ptr(ptr);
+		bufs[i] = compat_ptr(ptr);
 		bufptr++;
 	}
 	if (dir == SNDRV_PCM_STREAM_PLAYBACK)

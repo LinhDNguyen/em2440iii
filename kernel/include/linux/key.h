@@ -9,7 +9,7 @@
  * 2 of the License, or (at your option) any later version.
  *
  *
- * See Documentation/keys.txt for information on keys/keyrings.
+ * See Documentation/security/keys.txt for information on keys/keyrings.
  */
 
 #ifndef _LINUX_KEY_H
@@ -21,7 +21,7 @@
 #include <linux/rcupdate.h>
 #include <linux/sysctl.h>
 #include <linux/rwsem.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #ifdef __KERNEL__
 
@@ -129,7 +129,10 @@ struct key {
 	struct rw_semaphore	sem;		/* change vs change sem */
 	struct key_user		*user;		/* owner of this key */
 	void			*security;	/* security data for this key */
-	time_t			expiry;		/* time at which key expires (or 0) */
+	union {
+		time_t		expiry;		/* time at which key expires (or 0) */
+		time_t		revoked_at;	/* time at which key was revoked */
+	};
 	uid_t			uid;
 	gid_t			gid;
 	key_perm_t		perm;		/* access permissions */
@@ -167,6 +170,7 @@ struct key {
 		struct list_head	link;
 		unsigned long		x[2];
 		void			*p[2];
+		int			reject_error;
 	} type_data;
 
 	/* key data
@@ -175,8 +179,9 @@ struct key {
 	 */
 	union {
 		unsigned long		value;
+		void __rcu		*rcudata;
 		void			*data;
-		struct keyring_list	*subscriptions;
+		struct keyring_list __rcu *subscriptions;
 	} payload;
 };
 
@@ -271,9 +276,28 @@ static inline key_serial_t key_serial(struct key *key)
 	return key ? key->serial : 0;
 }
 
+/**
+ * key_is_instantiated - Determine if a key has been positively instantiated
+ * @key: The key to check.
+ *
+ * Return true if the specified key has been positively instantiated, false
+ * otherwise.
+ */
+static inline bool key_is_instantiated(const struct key *key)
+{
+	return test_bit(KEY_FLAG_INSTANTIATED, &key->flags) &&
+		!test_bit(KEY_FLAG_NEGATIVE, &key->flags);
+}
+
+#define rcu_dereference_key(KEY)					\
+	(rcu_dereference_protected((KEY)->payload.rcudata,		\
+				   rwsem_is_locked(&((struct key *)(KEY))->sem)))
+
 #ifdef CONFIG_SYSCTL
 extern ctl_table key_sysctls[];
 #endif
+
+extern void key_replace_session_keyring(void);
 
 /*
  * the userspace interface
@@ -297,6 +321,7 @@ extern void key_init(void);
 #define key_fsuid_changed(t)		do { } while(0)
 #define key_fsgid_changed(t)		do { } while(0)
 #define key_init()			do { } while(0)
+#define key_replace_session_keyring()	do { } while(0)
 
 #endif /* CONFIG_KEYS */
 #endif /* __KERNEL__ */

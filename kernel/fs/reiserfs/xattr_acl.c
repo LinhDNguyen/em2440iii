@@ -5,6 +5,7 @@
 #include <linux/errno.h>
 #include <linux/pagemap.h>
 #include <linux/xattr.h>
+#include <linux/slab.h>
 #include <linux/posix_acl_xattr.h>
 #include <linux/reiserfs_xattr.h>
 #include <linux/reiserfs_acl.h>
@@ -15,15 +16,17 @@ static int reiserfs_set_acl(struct reiserfs_transaction_handle *th,
 			    struct posix_acl *acl);
 
 static int
-xattr_set_acl(struct inode *inode, int type, const void *value, size_t size)
+posix_acl_set(struct dentry *dentry, const char *name, const void *value,
+		size_t size, int flags, int type)
 {
+	struct inode *inode = dentry->d_inode;
 	struct posix_acl *acl;
 	int error, error2;
 	struct reiserfs_transaction_handle th;
 	size_t jcreate_blocks;
 	if (!reiserfs_posixacl(inode->i_sb))
 		return -EOPNOTSUPP;
-	if (!is_owner_or_cap(inode))
+	if (!inode_owner_or_capable(inode))
 		return -EPERM;
 
 	if (value) {
@@ -60,15 +63,16 @@ xattr_set_acl(struct inode *inode, int type, const void *value, size_t size)
 }
 
 static int
-xattr_get_acl(struct inode *inode, int type, void *buffer, size_t size)
+posix_acl_get(struct dentry *dentry, const char *name, void *buffer,
+		size_t size, int type)
 {
 	struct posix_acl *acl;
 	int error;
 
-	if (!reiserfs_posixacl(inode->i_sb))
+	if (!reiserfs_posixacl(dentry->d_sb))
 		return -EOPNOTSUPP;
 
-	acl = reiserfs_get_acl(inode, type);
+	acl = reiserfs_get_acl(dentry->d_inode, type);
 	if (IS_ERR(acl))
 		return PTR_ERR(acl);
 	if (acl == NULL)
@@ -188,29 +192,6 @@ static void *posix_acl_to_disk(const struct posix_acl *acl, size_t * size)
 	return ERR_PTR(-EINVAL);
 }
 
-static inline void iset_acl(struct inode *inode, struct posix_acl **i_acl,
-			    struct posix_acl *acl)
-{
-	spin_lock(&inode->i_lock);
-	if (*i_acl != ERR_PTR(-ENODATA))
-		posix_acl_release(*i_acl);
-	*i_acl = posix_acl_dup(acl);
-	spin_unlock(&inode->i_lock);
-}
-
-static inline struct posix_acl *iget_acl(struct inode *inode,
-					 struct posix_acl **i_acl)
-{
-	struct posix_acl *acl = ERR_PTR(-ENODATA);
-
-	spin_lock(&inode->i_lock);
-	if (*i_acl != ERR_PTR(-ENODATA))
-		acl = posix_acl_dup(*i_acl);
-	spin_unlock(&inode->i_lock);
-
-	return acl;
-}
-
 /*
  * Inode operation get_posix_acl().
  *
@@ -220,34 +201,29 @@ static inline struct posix_acl *iget_acl(struct inode *inode,
 struct posix_acl *reiserfs_get_acl(struct inode *inode, int type)
 {
 	char *name, *value;
-	struct posix_acl *acl, **p_acl;
+	struct posix_acl *acl;
 	int size;
 	int retval;
-	struct reiserfs_inode_info *reiserfs_i = REISERFS_I(inode);
+
+	acl = get_cached_acl(inode, type);
+	if (acl != ACL_NOT_CACHED)
+		return acl;
 
 	switch (type) {
 	case ACL_TYPE_ACCESS:
 		name = POSIX_ACL_XATTR_ACCESS;
-		p_acl = &reiserfs_i->i_acl_access;
 		break;
 	case ACL_TYPE_DEFAULT:
 		name = POSIX_ACL_XATTR_DEFAULT;
-		p_acl = &reiserfs_i->i_acl_default;
 		break;
 	default:
-		return ERR_PTR(-EINVAL);
+		BUG();
 	}
-
-	acl = iget_acl(inode, p_acl);
-	if (acl && !IS_ERR(acl))
-		return acl;
-	else if (PTR_ERR(acl) == -ENODATA)
-		return NULL;
 
 	size = reiserfs_xattr_get(inode, name, NULL, 0);
 	if (size < 0) {
 		if (size == -ENODATA || size == -ENOSYS) {
-			*p_acl = ERR_PTR(-ENODATA);
+			set_cached_acl(inode, type, NULL);
 			return NULL;
 		}
 		return ERR_PTR(size);
@@ -262,14 +238,13 @@ struct posix_acl *reiserfs_get_acl(struct inode *inode, int type)
 		/* This shouldn't actually happen as it should have
 		   been caught above.. but just in case */
 		acl = NULL;
-		*p_acl = ERR_PTR(-ENODATA);
 	} else if (retval < 0) {
 		acl = ERR_PTR(retval);
 	} else {
 		acl = posix_acl_from_disk(value, retval);
-		if (!IS_ERR(acl))
-			iset_acl(inode, p_acl, acl);
 	}
+	if (!IS_ERR(acl))
+		set_cached_acl(inode, type, acl);
 
 	kfree(value);
 	return acl;
@@ -287,10 +262,8 @@ reiserfs_set_acl(struct reiserfs_transaction_handle *th, struct inode *inode,
 {
 	char *name;
 	void *value = NULL;
-	struct posix_acl **p_acl;
 	size_t size = 0;
 	int error;
-	struct reiserfs_inode_info *reiserfs_i = REISERFS_I(inode);
 
 	if (S_ISLNK(inode->i_mode))
 		return -EOPNOTSUPP;
@@ -298,14 +271,11 @@ reiserfs_set_acl(struct reiserfs_transaction_handle *th, struct inode *inode,
 	switch (type) {
 	case ACL_TYPE_ACCESS:
 		name = POSIX_ACL_XATTR_ACCESS;
-		p_acl = &reiserfs_i->i_acl_access;
 		if (acl) {
-			mode_t mode = inode->i_mode;
-			error = posix_acl_equiv_mode(acl, &mode);
+			error = posix_acl_equiv_mode(acl, &inode->i_mode);
 			if (error < 0)
 				return error;
 			else {
-				inode->i_mode = mode;
 				if (error == 0)
 					acl = NULL;
 			}
@@ -313,7 +283,6 @@ reiserfs_set_acl(struct reiserfs_transaction_handle *th, struct inode *inode,
 		break;
 	case ACL_TYPE_DEFAULT:
 		name = POSIX_ACL_XATTR_DEFAULT;
-		p_acl = &reiserfs_i->i_acl_default;
 		if (!S_ISDIR(inode->i_mode))
 			return acl ? -EACCES : 0;
 		break;
@@ -346,7 +315,7 @@ reiserfs_set_acl(struct reiserfs_transaction_handle *th, struct inode *inode,
 	kfree(value);
 
 	if (!error)
-		iset_acl(inode, p_acl, acl);
+		set_cached_acl(inode, type, acl);
 
 	return error;
 }
@@ -379,17 +348,10 @@ reiserfs_inherit_default_acl(struct reiserfs_transaction_handle *th,
 	}
 
 	acl = reiserfs_get_acl(dir, ACL_TYPE_DEFAULT);
-	if (IS_ERR(acl)) {
-		if (PTR_ERR(acl) == -ENODATA)
-			goto apply_umask;
+	if (IS_ERR(acl))
 		return PTR_ERR(acl);
-	}
 
 	if (acl) {
-		struct posix_acl *acl_copy;
-		mode_t mode = inode->i_mode;
-		int need_acl;
-
 		/* Copy the default ACL to the default ACL of a new directory */
 		if (S_ISDIR(inode->i_mode)) {
 			err = reiserfs_set_acl(th, inode, ACL_TYPE_DEFAULT,
@@ -400,29 +362,13 @@ reiserfs_inherit_default_acl(struct reiserfs_transaction_handle *th,
 
 		/* Now we reconcile the new ACL and the mode,
 		   potentially modifying both */
-		acl_copy = posix_acl_clone(acl, GFP_NOFS);
-		if (!acl_copy) {
-			err = -ENOMEM;
-			goto cleanup;
-		}
+		err = posix_acl_create(&acl, GFP_NOFS, &inode->i_mode);
+		if (err < 0)
+			return err;
 
-		need_acl = posix_acl_create_masq(acl_copy, &mode);
-		if (need_acl >= 0) {
-			if (mode != inode->i_mode) {
-				inode->i_mode = mode;
-			}
-
-			/* If we need an ACL.. */
-			if (need_acl > 0) {
-				err = reiserfs_set_acl(th, inode,
-						       ACL_TYPE_ACCESS,
-						       acl_copy);
-				if (err)
-					goto cleanup_copy;
-			}
-		}
-	      cleanup_copy:
-		posix_acl_release(acl_copy);
+		/* If we need an ACL.. */
+		if (err > 0)
+			err = reiserfs_set_acl(th, inode, ACL_TYPE_ACCESS, acl);
 	      cleanup:
 		posix_acl_release(acl);
 	} else {
@@ -477,7 +423,10 @@ int reiserfs_cache_default_acl(struct inode *inode)
 
 int reiserfs_acl_chmod(struct inode *inode)
 {
-	struct posix_acl *acl, *clone;
+	struct reiserfs_transaction_handle th;
+	struct posix_acl *acl;
+	size_t size;
+	int depth;
 	int error;
 
 	if (S_ISLNK(inode->i_mode))
@@ -488,106 +437,68 @@ int reiserfs_acl_chmod(struct inode *inode)
 		return 0;
 	}
 
+	reiserfs_write_unlock(inode->i_sb);
 	acl = reiserfs_get_acl(inode, ACL_TYPE_ACCESS);
+	reiserfs_write_lock(inode->i_sb);
 	if (!acl)
 		return 0;
 	if (IS_ERR(acl))
 		return PTR_ERR(acl);
-	clone = posix_acl_clone(acl, GFP_NOFS);
-	posix_acl_release(acl);
-	if (!clone)
-		return -ENOMEM;
-	error = posix_acl_chmod_masq(clone, inode->i_mode);
+	error = posix_acl_chmod(&acl, GFP_NOFS, inode->i_mode);
+	if (error)
+		return error;
+
+	size = reiserfs_xattr_nblocks(inode, reiserfs_acl_size(acl->a_count));
+	depth = reiserfs_write_lock_once(inode->i_sb);
+	error = journal_begin(&th, inode->i_sb, size * 2);
 	if (!error) {
-		struct reiserfs_transaction_handle th;
-		size_t size = reiserfs_xattr_nblocks(inode,
-					     reiserfs_acl_size(clone->a_count));
-		reiserfs_write_lock(inode->i_sb);
-		error = journal_begin(&th, inode->i_sb, size * 2);
-		if (!error) {
-			int error2;
-			error = reiserfs_set_acl(&th, inode, ACL_TYPE_ACCESS,
-						 clone);
-			error2 = journal_end(&th, inode->i_sb, size * 2);
-			if (error2)
-				error = error2;
-		}
-		reiserfs_write_unlock(inode->i_sb);
+		int error2;
+		error = reiserfs_set_acl(&th, inode, ACL_TYPE_ACCESS, acl);
+		error2 = journal_end(&th, inode->i_sb, size * 2);
+		if (error2)
+			error = error2;
 	}
-	posix_acl_release(clone);
+	reiserfs_write_unlock_once(inode->i_sb, depth);
+	posix_acl_release(acl);
 	return error;
 }
 
-static int
-posix_acl_access_get(struct inode *inode, const char *name,
-		     void *buffer, size_t size)
-{
-	if (strlen(name) != sizeof(POSIX_ACL_XATTR_ACCESS) - 1)
-		return -EINVAL;
-	return xattr_get_acl(inode, ACL_TYPE_ACCESS, buffer, size);
-}
-
-static int
-posix_acl_access_set(struct inode *inode, const char *name,
-		     const void *value, size_t size, int flags)
-{
-	if (strlen(name) != sizeof(POSIX_ACL_XATTR_ACCESS) - 1)
-		return -EINVAL;
-	return xattr_set_acl(inode, ACL_TYPE_ACCESS, value, size);
-}
-
-static size_t posix_acl_access_list(struct inode *inode, char *list,
+static size_t posix_acl_access_list(struct dentry *dentry, char *list,
 				    size_t list_size, const char *name,
-				    size_t name_len)
+				    size_t name_len, int type)
 {
 	const size_t size = sizeof(POSIX_ACL_XATTR_ACCESS);
-	if (!reiserfs_posixacl(inode->i_sb))
+	if (!reiserfs_posixacl(dentry->d_sb))
 		return 0;
 	if (list && size <= list_size)
 		memcpy(list, POSIX_ACL_XATTR_ACCESS, size);
 	return size;
 }
 
-struct xattr_handler reiserfs_posix_acl_access_handler = {
+const struct xattr_handler reiserfs_posix_acl_access_handler = {
 	.prefix = POSIX_ACL_XATTR_ACCESS,
-	.get = posix_acl_access_get,
-	.set = posix_acl_access_set,
+	.flags = ACL_TYPE_ACCESS,
+	.get = posix_acl_get,
+	.set = posix_acl_set,
 	.list = posix_acl_access_list,
 };
 
-static int
-posix_acl_default_get(struct inode *inode, const char *name,
-		      void *buffer, size_t size)
-{
-	if (strlen(name) != sizeof(POSIX_ACL_XATTR_DEFAULT) - 1)
-		return -EINVAL;
-	return xattr_get_acl(inode, ACL_TYPE_DEFAULT, buffer, size);
-}
-
-static int
-posix_acl_default_set(struct inode *inode, const char *name,
-		      const void *value, size_t size, int flags)
-{
-	if (strlen(name) != sizeof(POSIX_ACL_XATTR_DEFAULT) - 1)
-		return -EINVAL;
-	return xattr_set_acl(inode, ACL_TYPE_DEFAULT, value, size);
-}
-
-static size_t posix_acl_default_list(struct inode *inode, char *list,
+static size_t posix_acl_default_list(struct dentry *dentry, char *list,
 				     size_t list_size, const char *name,
-				     size_t name_len)
+				     size_t name_len, int type)
 {
 	const size_t size = sizeof(POSIX_ACL_XATTR_DEFAULT);
-	if (!reiserfs_posixacl(inode->i_sb))
+	if (!reiserfs_posixacl(dentry->d_sb))
 		return 0;
 	if (list && size <= list_size)
 		memcpy(list, POSIX_ACL_XATTR_DEFAULT, size);
 	return size;
 }
 
-struct xattr_handler reiserfs_posix_acl_default_handler = {
+const struct xattr_handler reiserfs_posix_acl_default_handler = {
 	.prefix = POSIX_ACL_XATTR_DEFAULT,
-	.get = posix_acl_default_get,
-	.set = posix_acl_default_set,
+	.flags = ACL_TYPE_DEFAULT,
+	.get = posix_acl_get,
+	.set = posix_acl_set,
 	.list = posix_acl_default_list,
 };

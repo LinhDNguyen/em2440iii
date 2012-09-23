@@ -25,6 +25,31 @@
  *  - add IOCTL message
  *  - add unsolicited notification support
  *  - add POLL message and NOTIFY_POLL notification
+ *
+ * 7.12
+ *  - add umask flag to input argument of open, mknod and mkdir
+ *  - add notification messages for invalidation of inodes and
+ *    directory entries
+ *
+ * 7.13
+ *  - make max number of background requests and congestion threshold
+ *    tunables
+ *
+ * 7.14
+ *  - add splice support to fuse device
+ *
+ * 7.15
+ *  - add store notify
+ *  - add retrieve notify
+ *
+ * 7.16
+ *  - add BATCH_FORGET request
+ *  - FUSE_IOCTL_UNRESTRICTED shall now return with array of 'struct
+ *    fuse_ioctl_iovec' instead of ambiguous 'struct iovec'
+ *  - add FUSE_IOCTL_32BIT flag
+ *
+ * 7.17
+ *  - add FUSE_FLOCK_LOCKS and FUSE_RELEASE_FLOCK_UNLOCK
  */
 
 #ifndef _LINUX_FUSE_H
@@ -32,11 +57,31 @@
 
 #include <linux/types.h>
 
+/*
+ * Version negotiation:
+ *
+ * Both the kernel and userspace send the version they support in the
+ * INIT request and reply respectively.
+ *
+ * If the major versions match then both shall use the smallest
+ * of the two minor versions for communication.
+ *
+ * If the kernel supports a larger major version, then userspace shall
+ * reply with the major version it supports, ignore the rest of the
+ * INIT message and expect a new INIT message from the kernel with a
+ * matching major version.
+ *
+ * If the library supports a larger major version, then it shall fall
+ * back to the major protocol version sent by the kernel for
+ * communication and reply with that major version (and an arbitrary
+ * supported minor version).
+ */
+
 /** Version number of this interface */
 #define FUSE_KERNEL_VERSION 7
 
 /** Minor version number of this interface */
-#define FUSE_KERNEL_MINOR_VERSION 11
+#define FUSE_KERNEL_MINOR_VERSION 17
 
 /** The node ID of the root inode */
 #define FUSE_ROOT_ID 1
@@ -111,7 +156,10 @@ struct fuse_file_lock {
 /**
  * INIT request/reply flags
  *
+ * FUSE_POSIX_LOCKS: remote locking for POSIX file locks
  * FUSE_EXPORT_SUPPORT: filesystem handles lookups of "." and ".."
+ * FUSE_DONT_MASK: don't apply umask to file mode on create operations
+ * FUSE_FLOCK_LOCKS: remote locking for BSD style file locks
  */
 #define FUSE_ASYNC_READ		(1 << 0)
 #define FUSE_POSIX_LOCKS	(1 << 1)
@@ -119,11 +167,21 @@ struct fuse_file_lock {
 #define FUSE_ATOMIC_O_TRUNC	(1 << 3)
 #define FUSE_EXPORT_SUPPORT	(1 << 4)
 #define FUSE_BIG_WRITES		(1 << 5)
+#define FUSE_DONT_MASK		(1 << 6)
+#define FUSE_FLOCK_LOCKS	(1 << 10)
+
+/**
+ * CUSE INIT request/reply flags
+ *
+ * CUSE_UNRESTRICTED_IOCTL:  use unrestricted ioctl
+ */
+#define CUSE_UNRESTRICTED_IOCTL	(1 << 0)
 
 /**
  * Release flags
  */
 #define FUSE_RELEASE_FLUSH	(1 << 0)
+#define FUSE_RELEASE_FLOCK_UNLOCK	(1 << 1)
 
 /**
  * Getattr flags
@@ -155,12 +213,14 @@ struct fuse_file_lock {
  * FUSE_IOCTL_COMPAT: 32bit compat ioctl on 64bit machine
  * FUSE_IOCTL_UNRESTRICTED: not restricted to well-formed ioctls, retry allowed
  * FUSE_IOCTL_RETRY: retry with new iovecs
+ * FUSE_IOCTL_32BIT: 32bit ioctl
  *
  * FUSE_IOCTL_MAX_IOV: maximum of in_iovecs + out_iovecs
  */
 #define FUSE_IOCTL_COMPAT	(1 << 0)
 #define FUSE_IOCTL_UNRESTRICTED	(1 << 1)
 #define FUSE_IOCTL_RETRY	(1 << 2)
+#define FUSE_IOCTL_32BIT	(1 << 3)
 
 #define FUSE_IOCTL_MAX_IOV	256
 
@@ -210,10 +270,19 @@ enum fuse_opcode {
 	FUSE_DESTROY       = 38,
 	FUSE_IOCTL         = 39,
 	FUSE_POLL          = 40,
+	FUSE_NOTIFY_REPLY  = 41,
+	FUSE_BATCH_FORGET  = 42,
+
+	/* CUSE specific operations */
+	CUSE_INIT          = 4096,
 };
 
 enum fuse_notify_code {
 	FUSE_NOTIFY_POLL   = 1,
+	FUSE_NOTIFY_INVAL_INODE = 2,
+	FUSE_NOTIFY_INVAL_ENTRY = 3,
+	FUSE_NOTIFY_STORE = 4,
+	FUSE_NOTIFY_RETRIEVE = 5,
 	FUSE_NOTIFY_CODE_MAX,
 };
 
@@ -237,6 +306,16 @@ struct fuse_forget_in {
 	__u64	nlookup;
 };
 
+struct fuse_forget_one {
+	__u64	nodeid;
+	__u64	nlookup;
+};
+
+struct fuse_batch_forget_in {
+	__u32	count;
+	__u32	dummy;
+};
+
 struct fuse_getattr_in {
 	__u32	getattr_flags;
 	__u32	dummy;
@@ -252,14 +331,18 @@ struct fuse_attr_out {
 	struct fuse_attr attr;
 };
 
+#define FUSE_COMPAT_MKNOD_IN_SIZE 8
+
 struct fuse_mknod_in {
 	__u32	mode;
 	__u32	rdev;
+	__u32	umask;
+	__u32	padding;
 };
 
 struct fuse_mkdir_in {
 	__u32	mode;
-	__u32	padding;
+	__u32	umask;
 };
 
 struct fuse_rename_in {
@@ -291,7 +374,14 @@ struct fuse_setattr_in {
 
 struct fuse_open_in {
 	__u32	flags;
+	__u32	unused;
+};
+
+struct fuse_create_in {
+	__u32	flags;
 	__u32	mode;
+	__u32	umask;
+	__u32	padding;
 };
 
 struct fuse_open_out {
@@ -397,8 +487,30 @@ struct fuse_init_out {
 	__u32	minor;
 	__u32	max_readahead;
 	__u32	flags;
-	__u32	unused;
+	__u16   max_background;
+	__u16   congestion_threshold;
 	__u32	max_write;
+};
+
+#define CUSE_INIT_INFO_MAX 4096
+
+struct cuse_init_in {
+	__u32	major;
+	__u32	minor;
+	__u32	unused;
+	__u32	flags;
+};
+
+struct cuse_init_out {
+	__u32	major;
+	__u32	minor;
+	__u32	unused;
+	__u32	flags;
+	__u32	max_read;
+	__u32	max_write;
+	__u32	dev_major;		/* chardev major */
+	__u32	dev_minor;		/* chardev minor */
+	__u32	spare[10];
 };
 
 struct fuse_interrupt_in {
@@ -422,6 +534,11 @@ struct fuse_ioctl_in {
 	__u64	arg;
 	__u32	in_size;
 	__u32	out_size;
+};
+
+struct fuse_ioctl_iovec {
+	__u64	base;
+	__u64	len;
 };
 
 struct fuse_ioctl_out {
@@ -476,5 +593,42 @@ struct fuse_dirent {
 #define FUSE_DIRENT_ALIGN(x) (((x) + sizeof(__u64) - 1) & ~(sizeof(__u64) - 1))
 #define FUSE_DIRENT_SIZE(d) \
 	FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET + (d)->namelen)
+
+struct fuse_notify_inval_inode_out {
+	__u64	ino;
+	__s64	off;
+	__s64	len;
+};
+
+struct fuse_notify_inval_entry_out {
+	__u64	parent;
+	__u32	namelen;
+	__u32	padding;
+};
+
+struct fuse_notify_store_out {
+	__u64	nodeid;
+	__u64	offset;
+	__u32	size;
+	__u32	padding;
+};
+
+struct fuse_notify_retrieve_out {
+	__u64	notify_unique;
+	__u64	nodeid;
+	__u64	offset;
+	__u32	size;
+	__u32	padding;
+};
+
+/* Matches the size of fuse_write_in */
+struct fuse_notify_retrieve_in {
+	__u64	dummy1;
+	__u64	offset;
+	__u32	size;
+	__u32	dummy2;
+	__u64	dummy3;
+	__u64	dummy4;
+};
 
 #endif /* _LINUX_FUSE_H */

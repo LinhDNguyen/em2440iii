@@ -39,6 +39,9 @@ struct configfs_dirent {
 	umode_t			s_mode;
 	struct dentry		* s_dentry;
 	struct iattr		* s_iattr;
+#ifdef CONFIG_LOCKDEP
+	int			s_depth;
+#endif
 };
 
 #define CONFIGFS_ROOT		0x0001
@@ -87,6 +90,7 @@ extern const struct file_operations configfs_file_operations;
 extern const struct file_operations bin_fops;
 extern const struct inode_operations configfs_dir_inode_operations;
 extern const struct inode_operations configfs_symlink_inode_operations;
+extern const struct dentry_operations configfs_dentry_ops;
 
 extern int configfs_symlink(struct inode *dir, struct dentry *dentry,
 			    const char *symname);
@@ -117,7 +121,7 @@ static inline struct config_item *configfs_get_config_item(struct dentry *dentry
 {
 	struct config_item * item = NULL;
 
-	spin_lock(&dcache_lock);
+	spin_lock(&dentry->d_lock);
 	if (!d_unhashed(dentry)) {
 		struct configfs_dirent * sd = dentry->d_fsdata;
 		if (sd->s_type & CONFIGFS_ITEM_LINK) {
@@ -126,7 +130,7 @@ static inline struct config_item *configfs_get_config_item(struct dentry *dentry
 		} else
 			item = config_item_get(sd->s_element);
 	}
-	spin_unlock(&dcache_lock);
+	spin_unlock(&dentry->d_lock);
 
 	return item;
 }

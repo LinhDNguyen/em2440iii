@@ -11,8 +11,8 @@ extern struct matrox_switch matrox_mystique;
 extern struct matrox_switch matrox_G100;
 #endif
 #ifdef NEED_DAC1064
-void DAC1064_global_init(WPMINFO2);
-void DAC1064_global_restore(WPMINFO2);
+void DAC1064_global_init(struct matrox_fb_info *minfo);
+void DAC1064_global_restore(struct matrox_fb_info *minfo);
 #endif
 
 #define M1064_INDEX	0x00
@@ -46,7 +46,7 @@ void DAC1064_global_restore(WPMINFO2);
 #define      M1064_XDVICLKCTRL_DVILOOPCTL       0x30
 	/* CRTC2 pixel clock allowed to(0)/blocked from(1) driving CRTC2 */
 #define      M1064_XDVICLKCTRL_C2DVICLKEN       0x40
-	/* P1PLL loop filter bandwith selection */
+	/* P1PLL loop filter bandwidth selection */
 #define      M1064_XDVICLKCTRL_P1LOOPBWDTCTL    0x80
 #define M1064_XCURCOL0RED	0x08
 #define M1064_XCURCOL0GREEN	0x09

@@ -16,6 +16,7 @@
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
 #include <linux/leds.h>
+#include <linux/slab.h>
 #include "leds.h"
 
 struct gpio_trig_data {
@@ -44,22 +45,22 @@ static void gpio_trig_work(struct work_struct *work)
 			struct gpio_trig_data, work);
 	int tmp;
 
-       if (!gpio_data->gpio)
-	       return;
+	if (!gpio_data->gpio)
+		return;
 
-       tmp = gpio_get_value(gpio_data->gpio);
-       if (gpio_data->inverted)
-	       tmp = !tmp;
+	tmp = gpio_get_value(gpio_data->gpio);
+	if (gpio_data->inverted)
+		tmp = !tmp;
 
-       if (tmp) {
-               if (gpio_data->desired_brightness)
-                       led_set_brightness(gpio_data->led,
-                                       gpio_data->desired_brightness);
-               else
-                       led_set_brightness(gpio_data->led, LED_FULL);
-       } else {
-               led_set_brightness(gpio_data->led, LED_OFF);
-       }
+	if (tmp) {
+		if (gpio_data->desired_brightness)
+			led_set_brightness(gpio_data->led,
+					   gpio_data->desired_brightness);
+		else
+			led_set_brightness(gpio_data->led, LED_FULL);
+	} else {
+		led_set_brightness(gpio_data->led, LED_OFF);
+	}
 }
 
 static ssize_t gpio_trig_brightness_show(struct device *dev,
@@ -98,7 +99,7 @@ static ssize_t gpio_trig_inverted_show(struct device *dev,
 	struct led_classdev *led = dev_get_drvdata(dev);
 	struct gpio_trig_data *gpio_data = led->trigger_data;
 
-	return sprintf(buf, "%s\n", gpio_data->inverted ? "yes" : "no");
+	return sprintf(buf, "%u\n", gpio_data->inverted);
 }
 
 static ssize_t gpio_trig_inverted_store(struct device *dev,
@@ -106,16 +107,20 @@ static ssize_t gpio_trig_inverted_store(struct device *dev,
 {
 	struct led_classdev *led = dev_get_drvdata(dev);
 	struct gpio_trig_data *gpio_data = led->trigger_data;
-	unsigned inverted;
+	unsigned long inverted;
 	int ret;
 
-	ret = sscanf(buf, "%u", &inverted);
-	if (ret < 1) {
-		dev_err(dev, "invalid value\n");
-		return -EINVAL;
-	}
+	ret = strict_strtoul(buf, 10, &inverted);
+	if (ret < 0)
+		return ret;
 
-	gpio_data->inverted = !!inverted;
+	if (inverted > 1)
+		return -EINVAL;
+
+	gpio_data->inverted = inverted;
+
+	/* After inverting, we need to update the LED. */
+	schedule_work(&gpio_data->work);
 
 	return n;
 }
@@ -146,20 +151,26 @@ static ssize_t gpio_trig_gpio_store(struct device *dev,
 		return -EINVAL;
 	}
 
+	if (gpio_data->gpio == gpio)
+		return n;
+
 	if (!gpio) {
-		free_irq(gpio_to_irq(gpio_data->gpio), led);
+		if (gpio_data->gpio != 0)
+			free_irq(gpio_to_irq(gpio_data->gpio), led);
+		gpio_data->gpio = 0;
 		return n;
 	}
 
-	if (gpio_data->gpio > 0 && gpio_data->gpio != gpio)
-		free_irq(gpio_to_irq(gpio_data->gpio), led);
-
-	gpio_data->gpio = gpio;
 	ret = request_irq(gpio_to_irq(gpio), gpio_trig_irq,
 			IRQF_SHARED | IRQF_TRIGGER_RISING
 			| IRQF_TRIGGER_FALLING, "ledtrig-gpio", led);
-	if (ret)
+	if (ret) {
 		dev_err(dev, "request_irq failed with error %d\n", ret);
+	} else {
+		if (gpio_data->gpio != 0)
+			free_irq(gpio_to_irq(gpio_data->gpio), led);
+		gpio_data->gpio = gpio;
+	}
 
 	return ret ? ret : n;
 }
@@ -211,7 +222,8 @@ static void gpio_trig_deactivate(struct led_classdev *led)
 		device_remove_file(led->dev, &dev_attr_inverted);
 		device_remove_file(led->dev, &dev_attr_desired_brightness);
 		flush_work(&gpio_data->work);
-		free_irq(gpio_to_irq(gpio_data->gpio),led);
+		if (gpio_data->gpio != 0)
+			free_irq(gpio_to_irq(gpio_data->gpio), led);
 		kfree(gpio_data);
 	}
 }

@@ -4,12 +4,6 @@ obj-$(CONFIG_LOGO)			+= logo.o
 obj-$(CONFIG_LOGO_LINUX_MONO)		+= logo_linux_mono.o
 obj-$(CONFIG_LOGO_LINUX_VGA16)		+= logo_linux_vga16.o
 obj-$(CONFIG_LOGO_LINUX_CLUT224)	+= logo_linux_clut224.o
-obj-$(CONFIG_LOGO_LINUX_TFT240320_CLUT224)		+= logo_linux_tft240320_clut224.o
-obj-$(CONFIG_LOGO_LINUX_TFT320240_CLUT224)		+= logo_linux_tft320240_clut224.o
-obj-$(CONFIG_LOGO_LINUX_TFT480272_CLUT224)		+= logo_linux_tft480272_clut224.o
-obj-$(CONFIG_LOGO_LINUX_TFT640480_CLUT224)		+= logo_linux_tft640480_clut224.o
-obj-$(CONFIG_LOGO_LINUX_TFT800480_CLUT224)		+= logo_linux_tft800480_clut224.o
-obj-$(CONFIG_LOGO_LINUX_TFT800600_CLUT224)		+= logo_linux_tft800600_clut224.o
 obj-$(CONFIG_LOGO_BLACKFIN_CLUT224)	+= logo_blackfin_clut224.o
 obj-$(CONFIG_LOGO_BLACKFIN_VGA16)	+= logo_blackfin_vga16.o
 obj-$(CONFIG_LOGO_DEC_CLUT224)		+= logo_dec_clut224.o
@@ -43,22 +37,24 @@ extra-y += $(call logo-cfiles,_clut224,ppm)
 # Gray 256
 extra-y += $(call logo-cfiles,_gray256,pgm)
 
+pnmtologo := scripts/pnmtologo
+
 # Create commands like "pnmtologo -t mono -n logo_mac_mono -o ..."
 quiet_cmd_logo = LOGO    $@
-	cmd_logo = scripts/pnmtologo \
+	cmd_logo = $(pnmtologo) \
 			-t $(patsubst $*_%,%,$(notdir $(basename $<))) \
 			-n $(notdir $(basename $<)) -o $@ $<
 
-$(obj)/%_mono.c: $(src)/%_mono.pbm FORCE
+$(obj)/%_mono.c: $(src)/%_mono.pbm $(pnmtologo) FORCE
 	$(call if_changed,logo)
 
-$(obj)/%_vga16.c: $(src)/%_vga16.ppm FORCE
+$(obj)/%_vga16.c: $(src)/%_vga16.ppm $(pnmtologo) FORCE
 	$(call if_changed,logo)
 
-$(obj)/%_clut224.c: $(src)/%_clut224.ppm FORCE
+$(obj)/%_clut224.c: $(src)/%_clut224.ppm $(pnmtologo) FORCE
 	$(call if_changed,logo)
 
-$(obj)/%_gray256.c: $(src)/%_gray256.pgm FORCE
+$(obj)/%_gray256.c: $(src)/%_gray256.pgm $(pnmtologo) FORCE
 	$(call if_changed,logo)
 
 # Files generated that shall be removed upon make clean

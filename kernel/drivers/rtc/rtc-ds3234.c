@@ -158,7 +158,7 @@ static int __devinit ds3234_probe(struct spi_device *spi)
 
 static int __devexit ds3234_remove(struct spi_device *spi)
 {
-	struct rtc_device *rtc = platform_get_drvdata(spi);
+	struct rtc_device *rtc = spi_get_drvdata(spi);
 
 	rtc_device_unregister(rtc);
 	return 0;
@@ -188,3 +188,4 @@ module_exit(ds3234_exit);
 MODULE_DESCRIPTION("DS3234 SPI RTC driver");
 MODULE_AUTHOR("Dennis Aberilla <denzzzhome@yahoo.com>");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("spi:ds3234");

@@ -1,5 +1,5 @@
 /*
-	Copyright (C) 2004 - 2009 rt2x00 SourceForge Project
+	Copyright (C) 2004 - 2010 Ivo van Doorn <IvDoorn@gmail.com>
 	<http://rt2x00.serialmonkey.com>
 
 	This program is free software; you can redistribute it and/or modify
@@ -29,51 +29,38 @@
 #include <linux/prefetch.h>
 
 /**
- * DOC: Entrie frame size
+ * DOC: Entry frame size
  *
  * Ralink PCI devices demand the Frame size to be a multiple of 128 bytes,
  * for USB devices this restriction does not apply, but the value of
  * 2432 makes sense since it is big enough to contain the maximum fragment
  * size according to the ieee802.11 specs.
+ * The aggregation size depends on support from the driver, but should
+ * be something around 3840 bytes.
  */
-#define DATA_FRAME_SIZE	2432
-#define MGMT_FRAME_SIZE	256
-
-/**
- * DOC: Number of entries per queue
- *
- * Under normal load without fragmentation 12 entries are sufficient
- * without the queue being filled up to the maximum. When using fragmentation
- * and the queue threshold code we need to add some additional margins to
- * make sure the queue will never (or only under extreme load) fill up
- * completely.
- * Since we don't use preallocated DMA having a large number of queue entries
- * will have only minimal impact on the memory requirements for the queue.
- */
-#define RX_ENTRIES	24
-#define TX_ENTRIES	24
-#define BEACON_ENTRIES	1
-#define ATIM_ENTRIES	8
+#define DATA_FRAME_SIZE		2432
+#define MGMT_FRAME_SIZE		256
+#define AGGREGATION_SIZE	3840
 
 /**
  * enum data_queue_qid: Queue identification
  *
+ * @QID_AC_VO: AC VO queue
+ * @QID_AC_VI: AC VI queue
  * @QID_AC_BE: AC BE queue
  * @QID_AC_BK: AC BK queue
- * @QID_AC_VI: AC VI queue
- * @QID_AC_VO: AC VO queue
  * @QID_HCCA: HCCA queue
  * @QID_MGMT: MGMT queue (prio queue)
  * @QID_RX: RX queue
  * @QID_OTHER: None of the above (don't use, only present for completeness)
  * @QID_BEACON: Beacon queue (value unspecified, don't send it to device)
- * @QID_ATIM: Atim queue (value unspeficied, don't send it to device)
+ * @QID_ATIM: Atim queue (value unspecified, don't send it to device)
  */
 enum data_queue_qid {
-	QID_AC_BE = 0,
-	QID_AC_BK = 1,
-	QID_AC_VI = 2,
-	QID_AC_VO = 3,
+	QID_AC_VO = 0,
+	QID_AC_VI = 1,
+	QID_AC_BE = 2,
+	QID_AC_BK = 3,
 	QID_HCCA = 4,
 	QID_MGMT = 13,
 	QID_RX = 14,
@@ -87,13 +74,19 @@ enum data_queue_qid {
  *
  * @SKBDESC_DMA_MAPPED_RX: &skb_dma field has been mapped for RX
  * @SKBDESC_DMA_MAPPED_TX: &skb_dma field has been mapped for TX
- * @FRAME_DESC_IV_STRIPPED: Frame contained a IV/EIV provided by
+ * @SKBDESC_IV_STRIPPED: Frame contained a IV/EIV provided by
  *	mac80211 but was stripped for processing by the driver.
+ * @SKBDESC_NOT_MAC80211: Frame didn't originate from mac80211,
+ *	don't try to pass it back.
+ * @SKBDESC_DESC_IN_SKB: The descriptor is at the start of the
+ *	skb, instead of in the desc field.
  */
 enum skb_frame_desc_flags {
 	SKBDESC_DMA_MAPPED_RX = 1 << 0,
 	SKBDESC_DMA_MAPPED_TX = 1 << 1,
-	FRAME_DESC_IV_STRIPPED = 1 << 2,
+	SKBDESC_IV_STRIPPED = 1 << 2,
+	SKBDESC_NOT_MAC80211 = 1 << 3,
+	SKBDESC_DESC_IN_SKB = 1 << 4,
 };
 
 /**
@@ -145,16 +138,20 @@ static inline struct skb_frame_desc* get_skb_frame_desc(struct sk_buff *skb)
  *
  * @RXDONE_SIGNAL_PLCP: Signal field contains the plcp value.
  * @RXDONE_SIGNAL_BITRATE: Signal field contains the bitrate value.
+ * @RXDONE_SIGNAL_MCS: Signal field contains the mcs value.
  * @RXDONE_MY_BSS: Does this frame originate from device's BSS.
  * @RXDONE_CRYPTO_IV: Driver provided IV/EIV data.
  * @RXDONE_CRYPTO_ICV: Driver provided ICV data.
+ * @RXDONE_L2PAD: 802.11 payload has been padded to 4-byte boundary.
  */
 enum rxdone_entry_desc_flags {
-	RXDONE_SIGNAL_PLCP = 1 << 0,
-	RXDONE_SIGNAL_BITRATE = 1 << 1,
-	RXDONE_MY_BSS = 1 << 2,
-	RXDONE_CRYPTO_IV = 1 << 3,
-	RXDONE_CRYPTO_ICV = 1 << 4,
+	RXDONE_SIGNAL_PLCP = BIT(0),
+	RXDONE_SIGNAL_BITRATE = BIT(1),
+	RXDONE_SIGNAL_MCS = BIT(2),
+	RXDONE_MY_BSS = BIT(3),
+	RXDONE_CRYPTO_IV = BIT(4),
+	RXDONE_CRYPTO_ICV = BIT(5),
+	RXDONE_L2PAD = BIT(6),
 };
 
 /**
@@ -163,7 +160,7 @@ enum rxdone_entry_desc_flags {
  * from &rxdone_entry_desc to a signal value type.
  */
 #define RXDONE_SIGNAL_MASK \
-       ( RXDONE_SIGNAL_PLCP | RXDONE_SIGNAL_BITRATE )
+	( RXDONE_SIGNAL_PLCP | RXDONE_SIGNAL_BITRATE | RXDONE_SIGNAL_MCS )
 
 /**
  * struct rxdone_entry_desc: RX Entry descriptor
@@ -173,10 +170,10 @@ enum rxdone_entry_desc_flags {
  * @timestamp: RX Timestamp
  * @signal: Signal of the received frame.
  * @rssi: RSSI of the received frame.
- * @noise: Measured noise during frame reception.
  * @size: Data size of the received frame.
  * @flags: MAC80211 receive flags (See &enum mac80211_rx_flags).
  * @dev_flags: Ralink receive flags (See &enum rxdone_entry_desc_flags).
+ * @rate_mode: Rate mode (See @enum rate_modulation).
  * @cipher: Cipher type used during decryption.
  * @cipher_status: Decryption status.
  * @iv: IV/EIV data used during decryption.
@@ -186,10 +183,10 @@ struct rxdone_entry_desc {
 	u64 timestamp;
 	int signal;
 	int rssi;
-	int noise;
 	int size;
 	int flags;
 	int dev_flags;
+	u16 rate_mode;
 	u8 cipher;
 	u8 cipher_status;
 
@@ -200,8 +197,16 @@ struct rxdone_entry_desc {
 /**
  * enum txdone_entry_desc_flags: Flags for &struct txdone_entry_desc
  *
+ * Every txdone report has to contain the basic result of the
+ * transmission, either &TXDONE_UNKNOWN, &TXDONE_SUCCESS or
+ * &TXDONE_FAILURE. The flag &TXDONE_FALLBACK can be used in
+ * conjunction with all of these flags but should only be set
+ * if retires > 0. The flag &TXDONE_EXCESSIVE_RETRY can only be used
+ * in conjunction with &TXDONE_FAILURE.
+ *
  * @TXDONE_UNKNOWN: Hardware could not determine success of transmission.
  * @TXDONE_SUCCESS: Frame was successfully send
+ * @TXDONE_FALLBACK: Hardware used fallback rates for retries
  * @TXDONE_FAILURE: Frame was not successfully send
  * @TXDONE_EXCESSIVE_RETRY: In addition to &TXDONE_FAILURE, the
  *	frame transmission failed due to excessive retries.
@@ -209,8 +214,10 @@ struct rxdone_entry_desc {
 enum txdone_entry_desc_flags {
 	TXDONE_UNKNOWN,
 	TXDONE_SUCCESS,
+	TXDONE_FALLBACK,
 	TXDONE_FAILURE,
 	TXDONE_EXCESSIVE_RETRY,
+	TXDONE_AMPDU,
 };
 
 /**
@@ -243,6 +250,10 @@ struct txdone_entry_desc {
  * @ENTRY_TXD_ENCRYPT_PAIRWISE: Use pairwise key table (instead of shared).
  * @ENTRY_TXD_ENCRYPT_IV: Generate IV/EIV in hardware.
  * @ENTRY_TXD_ENCRYPT_MMIC: Generate MIC in hardware.
+ * @ENTRY_TXD_HT_AMPDU: This frame is part of an AMPDU.
+ * @ENTRY_TXD_HT_BW_40: Use 40MHz Bandwidth.
+ * @ENTRY_TXD_HT_SHORT_GI: Use short GI.
+ * @ENTRY_TXD_HT_MIMO_PS: The receiving STA is in dynamic SM PS mode.
  */
 enum txentry_desc_flags {
 	ENTRY_TXD_RTS_FRAME,
@@ -258,6 +269,10 @@ enum txentry_desc_flags {
 	ENTRY_TXD_ENCRYPT_PAIRWISE,
 	ENTRY_TXD_ENCRYPT_IV,
 	ENTRY_TXD_ENCRYPT_MMIC,
+	ENTRY_TXD_HT_AMPDU,
+	ENTRY_TXD_HT_BW_40,
+	ENTRY_TXD_HT_SHORT_GI,
+	ENTRY_TXD_HT_MIMO_PS,
 };
 
 /**
@@ -266,42 +281,57 @@ enum txentry_desc_flags {
  * Summary of information for the frame descriptor before sending a TX frame.
  *
  * @flags: Descriptor flags (See &enum queue_entry_flags).
- * @queue: Queue identification (See &enum data_queue_qid).
+ * @length: Length of the entire frame.
+ * @header_length: Length of 802.11 header.
  * @length_high: PLCP length high word.
  * @length_low: PLCP length low word.
  * @signal: PLCP signal.
  * @service: PLCP service.
+ * @msc: MCS.
+ * @stbc: STBC.
+ * @ba_size: BA size.
  * @rate_mode: Rate mode (See @enum rate_modulation).
+ * @mpdu_density: MDPU density.
  * @retry_limit: Max number of retries.
- * @aifs: AIFS value.
  * @ifs: IFS value.
- * @cw_min: cwmin value.
- * @cw_max: cwmax value.
+ * @txop: IFS value for 11n capable chips.
  * @cipher: Cipher type used for encryption.
  * @key_idx: Key index used for encryption.
  * @iv_offset: Position where IV should be inserted by hardware.
+ * @iv_len: Length of IV data.
  */
 struct txentry_desc {
 	unsigned long flags;
 
-	enum data_queue_qid queue;
+	u16 length;
+	u16 header_length;
 
-	u16 length_high;
-	u16 length_low;
-	u16 signal;
-	u16 service;
+	union {
+		struct {
+			u16 length_high;
+			u16 length_low;
+			u16 signal;
+			u16 service;
+			enum ifs ifs;
+		} plcp;
 
-	u16 rate_mode;
+		struct {
+			u16 mcs;
+			u8 stbc;
+			u8 ba_size;
+			u8 mpdu_density;
+			enum txop txop;
+		} ht;
+	} u;
+
+	enum rate_modulation rate_mode;
 
 	short retry_limit;
-	short aifs;
-	short ifs;
-	short cw_min;
-	short cw_max;
 
 	enum cipher cipher;
 	u16 key_idx;
 	u16 iv_offset;
+	u16 iv_len;
 };
 
 /**
@@ -313,32 +343,38 @@ struct txentry_desc {
  * @ENTRY_OWNER_DEVICE_DATA: This entry is owned by the device for data
  *	transfer (either TX or RX depending on the queue). The entry should
  *	only be touched after the device has signaled it is done with it.
- * @ENTRY_OWNER_DEVICE_CRYPTO: This entry is owned by the device for data
- *	encryption or decryption. The entry should only be touched after
- *	the device has signaled it is done with it.
  * @ENTRY_DATA_PENDING: This entry contains a valid frame and is waiting
  *	for the signal to start sending.
+ * @ENTRY_DATA_IO_FAILED: Hardware indicated that an IO error occurred
+ *	while transferring the data to the hardware. No TX status report will
+ *	be expected from the hardware.
+ * @ENTRY_DATA_STATUS_PENDING: The entry has been send to the device and
+ *	returned. It is now waiting for the status reporting before the
+ *	entry can be reused again.
  */
 enum queue_entry_flags {
 	ENTRY_BCN_ASSIGNED,
 	ENTRY_OWNER_DEVICE_DATA,
-	ENTRY_OWNER_DEVICE_CRYPTO,
 	ENTRY_DATA_PENDING,
+	ENTRY_DATA_IO_FAILED,
+	ENTRY_DATA_STATUS_PENDING,
 };
 
 /**
  * struct queue_entry: Entry inside the &struct data_queue
  *
  * @flags: Entry flags, see &enum queue_entry_flags.
+ * @last_action: Timestamp of last change.
  * @queue: The data queue (&struct data_queue) to which this entry belongs.
  * @skb: The buffer which is currently being transmitted (for TX queue),
- *	or used to directly recieve data in (for RX queue).
+ *	or used to directly receive data in (for RX queue).
  * @entry_idx: The entry index number.
  * @priv_data: Private data belonging to this queue entry. The pointer
  *	points to data specific to a particular driver and queue type.
  */
 struct queue_entry {
 	unsigned long flags;
+	unsigned long last_action;
 
 	struct data_queue *queue;
 
@@ -354,19 +390,36 @@ struct queue_entry {
  *
  * @Q_INDEX: Index pointer to the current entry in the queue, if this entry is
  *	owned by the hardware then the queue is considered to be full.
+ * @Q_INDEX_DMA_DONE: Index pointer for the next entry which will have been
+ *	transferred to the hardware.
  * @Q_INDEX_DONE: Index pointer to the next entry which will be completed by
  *	the hardware and for which we need to run the txdone handler. If this
  *	entry is not owned by the hardware the queue is considered to be empty.
- * @Q_INDEX_CRYPTO: Index pointer to the next entry which encryption/decription
- *	will be completed by the hardware next.
  * @Q_INDEX_MAX: Keep last, used in &struct data_queue to determine the size
  *	of the index array.
  */
 enum queue_index {
 	Q_INDEX,
+	Q_INDEX_DMA_DONE,
 	Q_INDEX_DONE,
-	Q_INDEX_CRYPTO,
 	Q_INDEX_MAX,
+};
+
+/**
+ * enum data_queue_flags: Status flags for data queues
+ *
+ * @QUEUE_STARTED: The queue has been started. Fox RX queues this means the
+ *	device might be DMA'ing skbuffers. TX queues will accept skbuffers to
+ *	be transmitted and beacon queues will start beaconing the configured
+ *	beacons.
+ * @QUEUE_PAUSED: The queue has been started but is currently paused.
+ *	When this bit is set, the queue has been stopped in mac80211,
+ *	preventing new frames to be enqueued. However, a few frames
+ *	might still appear shortly after the pausing...
+ */
+enum data_queue_flags {
+	QUEUE_STARTED,
+	QUEUE_PAUSED,
 };
 
 /**
@@ -376,7 +429,11 @@ enum queue_index {
  * @entries: Base address of the &struct queue_entry which are
  *	part of this queue.
  * @qid: The queue identification, see &enum data_queue_qid.
- * @lock: Spinlock to protect index handling. Whenever @index, @index_done or
+ * @flags: Entry flags, see &enum queue_entry_flags.
+ * @status_lock: The mutex for protecting the start/stop/flush
+ *	handling on this queue.
+ * @tx_lock: Spinlock to serialize tx operations on this queue.
+ * @index_lock: Spinlock to protect index handling. Whenever @index, @index_done or
  *	@index_crypt needs to be changed this lock should be grabbed to prevent
  *	index corruption due to concurrency.
  * @count: Number of frames handled in the queue.
@@ -399,8 +456,12 @@ struct data_queue {
 	struct queue_entry *entries;
 
 	enum data_queue_qid qid;
+	unsigned long flags;
 
-	spinlock_t lock;
+	struct mutex status_lock;
+	spinlock_t tx_lock;
+	spinlock_t index_lock;
+
 	unsigned int count;
 	unsigned short limit;
 	unsigned short threshold;
@@ -518,6 +579,28 @@ struct data_queue_desc {
 	queue_loop(__entry, (__dev)->tx, queue_end(__dev))
 
 /**
+ * rt2x00queue_for_each_entry - Loop through all entries in the queue
+ * @queue: Pointer to @data_queue
+ * @start: &enum queue_index Pointer to start index
+ * @end: &enum queue_index Pointer to end index
+ * @data: Data to pass to the callback function
+ * @fn: The function to call for each &struct queue_entry
+ *
+ * This will walk through all entries in the queue, in chronological
+ * order. This means it will start at the current @start pointer
+ * and will walk through the queue until it reaches the @end pointer.
+ *
+ * If fn returns true for an entry rt2x00queue_for_each_entry will stop
+ * processing and return true as well.
+ */
+bool rt2x00queue_for_each_entry(struct data_queue *queue,
+				enum queue_index start,
+				enum queue_index end,
+				void *data,
+				bool (*fn)(struct queue_entry *entry,
+					   void *data));
+
+/**
  * rt2x00queue_empty - Check if the queue is empty.
  * @queue: Queue to check if empty.
  */
@@ -551,6 +634,28 @@ static inline int rt2x00queue_available(struct data_queue *queue)
 static inline int rt2x00queue_threshold(struct data_queue *queue)
 {
 	return rt2x00queue_available(queue) < queue->threshold;
+}
+
+/**
+ * rt2x00queue_status_timeout - Check if a timeout occurred for STATUS reports
+ * @entry: Queue entry to check.
+ */
+static inline int rt2x00queue_status_timeout(struct queue_entry *entry)
+{
+	if (!test_bit(ENTRY_DATA_STATUS_PENDING, &entry->flags))
+		return false;
+	return time_after(jiffies, entry->last_action + msecs_to_jiffies(100));
+}
+
+/**
+ * rt2x00queue_dma_timeout - Check if a timeout occurred for DMA transfers
+ * @entry: Queue entry to check.
+ */
+static inline int rt2x00queue_dma_timeout(struct queue_entry *entry)
+{
+	if (!test_bit(ENTRY_OWNER_DEVICE_DATA, &entry->flags))
+		return false;
+	return time_after(jiffies, entry->last_action + msecs_to_jiffies(100));
 }
 
 /**

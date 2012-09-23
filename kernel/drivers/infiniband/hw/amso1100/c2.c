@@ -36,6 +36,7 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/inetdevice.h>
+#include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/ethtool.h>
 #include <linux/mii.h>
@@ -46,6 +47,8 @@
 #include <linux/tcp.h>
 #include <linux/init.h>
 #include <linux/dma-mapping.h>
+#include <linux/slab.h>
+#include <linux/prefetch.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -86,11 +89,7 @@ MODULE_DEVICE_TABLE(pci, c2_pci_table);
 
 static void c2_print_macaddr(struct net_device *netdev)
 {
-	pr_debug("%s: MAC %02X:%02X:%02X:%02X:%02X:%02X, "
-		"IRQ %u\n", netdev->name,
-		netdev->dev_addr[0], netdev->dev_addr[1], netdev->dev_addr[2],
-		netdev->dev_addr[3], netdev->dev_addr[4], netdev->dev_addr[5],
-		netdev->irq);
+	pr_debug("%s: MAC %pM, IRQ %u\n", netdev->name, netdev->dev_addr, netdev->irq);
 }
 
 static void c2_set_rxbufsize(struct c2_port *c2_port)
@@ -530,7 +529,6 @@ static void c2_rx_interrupt(struct net_device *netdev)
 
 		netif_rx(skb);
 
-		netdev->last_rx = jiffies;
 		netdev->stats.rx_packets++;
 		netdev->stats.rx_bytes += buflen;
 	}

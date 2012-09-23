@@ -122,11 +122,12 @@ static int reserve_space(struct ubifs_info *c, int jhead, int len)
 	 * better to try to allocate space at the ends of eraseblocks. This is
 	 * what the squeeze parameter does.
 	 */
+	ubifs_assert(!c->ro_media && !c->ro_mount);
 	squeeze = (jhead == BASEHD);
 again:
 	mutex_lock_nested(&wbuf->io_mutex, wbuf->jhead);
 
-	if (c->ro_media) {
+	if (c->ro_error) {
 		err = -EROFS;
 		goto out_unlock;
 	}
@@ -140,14 +141,8 @@ again:
 	 * LEB with some empty space.
 	 */
 	lnum = ubifs_find_free_space(c, len, &offs, squeeze);
-	if (lnum >= 0) {
-		/* Found an LEB, add it to the journal head */
-		err = ubifs_add_bud_to_log(c, jhead, lnum, offs);
-		if (err)
-			goto out_return;
-		/* A new bud was successfully allocated and added to the log */
+	if (lnum >= 0)
 		goto out;
-	}
 
 	err = lnum;
 	if (err != -ENOSPC)
@@ -158,7 +153,7 @@ again:
 	 * some. But the write-buffer mutex has to be unlocked because
 	 * GC also takes it.
 	 */
-	dbg_jnl("no free space  jhead %d, run GC", jhead);
+	dbg_jnl("no free space in jhead %s, run GC", dbg_jhead(jhead));
 	mutex_unlock(&wbuf->io_mutex);
 
 	lnum = ubifs_garbage_collect(c, 0);
@@ -173,7 +168,8 @@ again:
 		 * because we dropped @wbuf->io_mutex, so try once
 		 * again.
 		 */
-		dbg_jnl("GC couldn't make a free LEB for jhead %d", jhead);
+		dbg_jnl("GC couldn't make a free LEB for jhead %s",
+			dbg_jhead(jhead));
 		if (retries++ < 2) {
 			dbg_jnl("retry (%d)", retries);
 			goto again;
@@ -184,7 +180,7 @@ again:
 	}
 
 	mutex_lock_nested(&wbuf->io_mutex, wbuf->jhead);
-	dbg_jnl("got LEB %d for jhead %d", lnum, jhead);
+	dbg_jnl("got LEB %d for jhead %s", lnum, dbg_jhead(jhead));
 	avail = c->leb_size - wbuf->offs - wbuf->used;
 
 	if (wbuf->lnum != -1 && avail >= len) {
@@ -201,12 +197,23 @@ again:
 		return 0;
 	}
 
-	err = ubifs_add_bud_to_log(c, jhead, lnum, 0);
-	if (err)
-		goto out_return;
 	offs = 0;
 
 out:
+	/*
+	 * Make sure we synchronize the write-buffer before we add the new bud
+	 * to the log. Otherwise we may have a power cut after the log
+	 * reference node for the last bud (@lnum) is written but before the
+	 * write-buffer data are written to the next-to-last bud
+	 * (@wbuf->lnum). And the effect would be that the recovery would see
+	 * that there is corruption in the next-to-last bud.
+	 */
+	err = ubifs_wbuf_sync_nolock(wbuf);
+	if (err)
+		goto out_return;
+	err = ubifs_add_bud_to_log(c, jhead, lnum, offs);
+	if (err)
+		goto out_return;
 	err = ubifs_wbuf_seek_nolock(wbuf, lnum, offs, wbuf->dtype);
 	if (err)
 		goto out_unlock;
@@ -255,7 +262,8 @@ static int write_node(struct ubifs_info *c, int jhead, void *node, int len,
 	*lnum = c->jheads[jhead].wbuf.lnum;
 	*offs = c->jheads[jhead].wbuf.offs + c->jheads[jhead].wbuf.used;
 
-	dbg_jnl("jhead %d, LEB %d:%d, len %d", jhead, *lnum, *offs, len);
+	dbg_jnl("jhead %s, LEB %d:%d, len %d",
+		dbg_jhead(jhead), *lnum, *offs, len);
 	ubifs_prepare_node(c, node, len, 0);
 
 	return ubifs_wbuf_write_nolock(wbuf, node, len);
@@ -285,7 +293,8 @@ static int write_head(struct ubifs_info *c, int jhead, void *buf, int len,
 
 	*lnum = c->jheads[jhead].wbuf.lnum;
 	*offs = c->jheads[jhead].wbuf.offs + c->jheads[jhead].wbuf.used;
-	dbg_jnl("jhead %d, LEB %d:%d, len %d", jhead, *lnum, *offs, len);
+	dbg_jnl("jhead %s, LEB %d:%d, len %d",
+		dbg_jhead(jhead), *lnum, *offs, len);
 
 	err = ubifs_wbuf_write_nolock(wbuf, buf, len);
 	if (err)
@@ -376,10 +385,8 @@ out:
 	if (err == -ENOSPC) {
 		/* This are some budgeting problems, print useful information */
 		down_write(&c->commit_sem);
-		spin_lock(&c->space_lock);
 		dbg_dump_stack();
-		dbg_dump_budg(c);
-		spin_unlock(&c->space_lock);
+		dbg_dump_budg(c, &c->bi);
 		dbg_dump_lprops(c);
 		cmt_retries = dbg_check_lprops(c);
 		up_write(&c->commit_sem);
@@ -662,6 +669,7 @@ out_free:
 
 out_release:
 	release_head(c, BASEHD);
+	kfree(dent);
 out_ro:
 	ubifs_ro_mode(c, err);
 	if (last_reference)
@@ -686,7 +694,7 @@ int ubifs_jnl_write_data(struct ubifs_info *c, const struct inode *inode,
 {
 	struct ubifs_data_node *data;
 	int err, lnum, offs, compr_type, out_len;
-	int dlen = UBIFS_DATA_NODE_SZ + UBIFS_BLOCK_SIZE * WORST_COMPR_FACTOR;
+	int dlen = COMPRESSED_DATA_NODE_BUF_SZ, allocated = 1;
 	struct ubifs_inode *ui = ubifs_inode(inode);
 
 	dbg_jnl("ino %lu, blk %u, len %d, key %s",
@@ -694,9 +702,19 @@ int ubifs_jnl_write_data(struct ubifs_info *c, const struct inode *inode,
 		DBGKEY(key));
 	ubifs_assert(len <= UBIFS_BLOCK_SIZE);
 
-	data = kmalloc(dlen, GFP_NOFS);
-	if (!data)
-		return -ENOMEM;
+	data = kmalloc(dlen, GFP_NOFS | __GFP_NOWARN);
+	if (!data) {
+		/*
+		 * Fall-back to the write reserve buffer. Note, we might be
+		 * currently on the memory reclaim path, when the kernel is
+		 * trying to free some memory by writing out dirty pages. The
+		 * write reserve buffer helps us to guarantee that we are
+		 * always able to write the data.
+		 */
+		allocated = 0;
+		mutex_lock(&c->write_reserve_mutex);
+		data = c->write_reserve_buf;
+	}
 
 	data->ch.node_type = UBIFS_DATA_NODE;
 	key_write(c, key, &data->key);
@@ -732,7 +750,10 @@ int ubifs_jnl_write_data(struct ubifs_info *c, const struct inode *inode,
 		goto out_ro;
 
 	finish_reservation(c);
-	kfree(data);
+	if (!allocated)
+		mutex_unlock(&c->write_reserve_mutex);
+	else
+		kfree(data);
 	return 0;
 
 out_release:
@@ -741,7 +762,10 @@ out_ro:
 	ubifs_ro_mode(c, err);
 	finish_reservation(c);
 out_free:
-	kfree(data);
+	if (!allocated)
+		mutex_unlock(&c->write_reserve_mutex);
+	else
+		kfree(data);
 	return err;
 }
 

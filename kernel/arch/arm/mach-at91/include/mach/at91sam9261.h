@@ -18,8 +18,6 @@
 /*
  * Peripheral identifiers/interrupts.
  */
-#define AT91_ID_FIQ		0	/* Advanced Interrupt Controller (FIQ) */
-#define AT91_ID_SYS		1	/* System Peripherals */
 #define AT91SAM9261_ID_PIOA	2	/* Parallel IO Controller A */
 #define AT91SAM9261_ID_PIOB	3	/* Parallel IO Controller B */
 #define AT91SAM9261_ID_PIOC	4	/* Parallel IO Controller C */
@@ -62,13 +60,12 @@
 #define AT91SAM9261_BASE_SSC2		0xfffc4000
 #define AT91SAM9261_BASE_SPI0		0xfffc8000
 #define AT91SAM9261_BASE_SPI1		0xfffcc000
-#define AT91_BASE_SYS			0xffffea00
 
 
 /*
  * System Peripherals (offset from AT91_BASE_SYS)
  */
-#define AT91_SDRAMC	(0xffffea00 - AT91_BASE_SYS)
+#define AT91_SDRAMC0	(0xffffea00 - AT91_BASE_SYS)
 #define AT91_SMC	(0xffffec00 - AT91_BASE_SYS)
 #define AT91_MATRIX	(0xffffee00 - AT91_BASE_SYS)
 #define AT91_AIC	(0xfffff000 - AT91_BASE_SYS)
@@ -94,6 +91,9 @@
  */
 #define AT91SAM9261_SRAM_BASE	0x00300000	/* Internal SRAM base address */
 #define AT91SAM9261_SRAM_SIZE	0x00028000	/* Internal SRAM size (160Kb) */
+
+#define AT91SAM9G10_SRAM_BASE	AT91SAM9261_SRAM_BASE	/* Internal SRAM base address */
+#define AT91SAM9G10_SRAM_SIZE	0x00004000	/* Internal SRAM size (16Kb) */
 
 #define AT91SAM9261_ROM_BASE	0x00400000	/* Internal ROM base address */
 #define AT91SAM9261_ROM_SIZE	SZ_32K		/* Internal ROM size (32Kb) */

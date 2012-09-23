@@ -58,7 +58,7 @@ _GLOBAL(slb_miss_kernel_load_linear)
 	li	r11,0
 BEGIN_FTR_SECTION
 	b	slb_finish_load
-END_FTR_SECTION_IFCLR(CPU_FTR_1T_SEGMENT)
+END_MMU_FTR_SECTION_IFCLR(MMU_FTR_1T_SEGMENT)
 	b	slb_finish_load_1T
 
 1:
@@ -72,24 +72,22 @@ _GLOBAL(slb_miss_kernel_load_vmemmap)
 1:
 #endif /* CONFIG_SPARSEMEM_VMEMMAP */
 
-	/* vmalloc/ioremap mapping encoding bits, the "li" instructions below
-	 * will be patched by the kernel at boot
+	/* vmalloc mapping gets the encoding from the PACA as the mapping
+	 * can be demoted from 64K -> 4K dynamically on some machines
 	 */
-BEGIN_FTR_SECTION
-	/* check whether this is in vmalloc or ioremap space */
 	clrldi	r11,r10,48
 	cmpldi	r11,(VMALLOC_SIZE >> 28) - 1
 	bgt	5f
 	lhz	r11,PACAVMALLOCSLLP(r13)
 	b	6f
 5:
-END_FTR_SECTION_IFCLR(CPU_FTR_CI_LARGE_PAGE)
-_GLOBAL(slb_miss_kernel_load_io)
+	/* IO mapping */
+	_GLOBAL(slb_miss_kernel_load_io)
 	li	r11,0
 6:
 BEGIN_FTR_SECTION
 	b	slb_finish_load
-END_FTR_SECTION_IFCLR(CPU_FTR_1T_SEGMENT)
+END_MMU_FTR_SECTION_IFCLR(MMU_FTR_1T_SEGMENT)
 	b	slb_finish_load_1T
 
 0:	/* user address: proto-VSID = context << 15 | ESID. First check
@@ -140,11 +138,11 @@ END_FTR_SECTION_IFCLR(CPU_FTR_1T_SEGMENT)
 	ld	r9,PACACONTEXTID(r13)
 BEGIN_FTR_SECTION
 	cmpldi	r10,0x1000
-END_FTR_SECTION_IFSET(CPU_FTR_1T_SEGMENT)
+END_MMU_FTR_SECTION_IFSET(MMU_FTR_1T_SEGMENT)
 	rldimi	r10,r9,USER_ESID_BITS,0
 BEGIN_FTR_SECTION
 	bge	slb_finish_load_1T
-END_FTR_SECTION_IFSET(CPU_FTR_1T_SEGMENT)
+END_MMU_FTR_SECTION_IFSET(MMU_FTR_1T_SEGMENT)
 	b	slb_finish_load
 
 8:	/* invalid EA */

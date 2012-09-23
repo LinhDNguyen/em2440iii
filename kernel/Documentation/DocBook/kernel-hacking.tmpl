@@ -352,7 +352,7 @@ asmlinkage long sys_mycall(int arg)
   </para>
 
   <programlisting>
-if (signal_pending()) 
+if (signal_pending(current))
         return -ERESTARTSYS;
   </programlisting>
 
@@ -409,7 +409,7 @@ cond_resched(); /* Will sleep */
 
   <para>
    You should always compile your kernel
-   <symbol>CONFIG_DEBUG_SPINLOCK_SLEEP</symbol> on, and it will warn
+   <symbol>CONFIG_DEBUG_ATOMIC_SLEEP</symbol> on, and it will warn
    you if you break these rules.  If you <emphasis>do</emphasis> break
    the rules, you will eventually lock up your box.
   </para>
@@ -449,8 +449,8 @@ printk(KERN_INFO "i = %u\n", i);
    </para>
 
    <programlisting>
-__u32 ipaddress;
-printk(KERN_INFO "my ip: %d.%d.%d.%d\n", NIPQUAD(ipaddress));
+__be32 ipaddress;
+printk(KERN_INFO "my ip: %pI4\n", &amp;ipaddress);
    </programlisting>
 
    <para>

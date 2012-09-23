@@ -13,6 +13,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
@@ -24,6 +25,7 @@
 #include <linux/interrupt.h>
 #include <linux/platform_device.h>
 #include <linux/clk.h>
+#include <linux/cpufreq.h>
 
 #include <asm/io.h>
 #include <asm/div64.h>
@@ -89,7 +91,7 @@ static void s3c2410fb_set_lcdaddr(struct fb_info *info)
 static unsigned int s3c2410fb_calc_pixclk(struct s3c2410fb_info *fbi,
 					  unsigned long pixclk)
 {
-	unsigned long clk = clk_get_rate(fbi->clk);
+	unsigned long clk = fbi->clk_rate;
 	unsigned long long div;
 
 	/* pixclk is in picoseconds, our clock is in Hz
@@ -371,7 +373,9 @@ static void s3c2410fb_activate_var(struct fb_info *info)
 	struct s3c2410fb_display *default_display = mach_info->displays +
 						    mach_info->default_display;
 	struct fb_var_screeninfo *var = &info->var;
-	int clkdiv = s3c2410fb_calc_pixclk(fbi, var->pixclock) / 2;
+	int clkdiv;
+
+	clkdiv = DIV_ROUND_UP(s3c2410fb_calc_pixclk(fbi, var->pixclock), 2);
 
 	dprintk("%s: var->xres  = %d\n", __func__, var->xres);
 	dprintk("%s: var->yres  = %d\n", __func__, var->yres);
@@ -388,7 +392,7 @@ static void s3c2410fb_activate_var(struct fb_info *info)
 			clkdiv = 2;
 	}
 
-//	fbi->regs.lcdcon1 |=  S3C2410_LCDCON1_CLKVAL(clkdiv);
+	/*fbi->regs.lcdcon1 |=  S3C2410_LCDCON1_CLKVAL(clkdiv);*/
 	fbi->regs.lcdcon1 |=  S3C2410_LCDCON1_CLKVAL(default_display->setclkval);
 
 	/* write new registers */
@@ -632,7 +636,7 @@ static struct fb_ops s3c2410fb_ops = {
  *	cache.  Once this area is remapped, all virtual memory
  *	access to the video memory should occur at the new region.
  */
-static int __init s3c2410fb_map_video_memory(struct fb_info *info)
+static int __devinit s3c2410fb_map_video_memory(struct fb_info *info)
 {
 	struct s3c2410fb_info *fbi = info->par;
 	dma_addr_t map_dma;
@@ -762,9 +766,60 @@ static irqreturn_t s3c2410fb_irq(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+#ifdef CONFIG_CPU_FREQ
+
+static int s3c2410fb_cpufreq_transition(struct notifier_block *nb,
+					unsigned long val, void *data)
+{
+	struct cpufreq_freqs *freqs = data;
+	struct s3c2410fb_info *info;
+	struct fb_info *fbinfo;
+	long delta_f;
+
+	info = container_of(nb, struct s3c2410fb_info, freq_transition);
+	fbinfo = platform_get_drvdata(to_platform_device(info->dev));
+
+	/* work out change, <0 for speed-up */
+	delta_f = info->clk_rate - clk_get_rate(info->clk);
+
+	if ((val == CPUFREQ_POSTCHANGE && delta_f > 0) ||
+	    (val == CPUFREQ_PRECHANGE && delta_f < 0)) {
+		info->clk_rate = clk_get_rate(info->clk);
+		s3c2410fb_activate_var(fbinfo);
+	}
+
+	return 0;
+}
+
+static inline int s3c2410fb_cpufreq_register(struct s3c2410fb_info *info)
+{
+	info->freq_transition.notifier_call = s3c2410fb_cpufreq_transition;
+
+	return cpufreq_register_notifier(&info->freq_transition,
+					 CPUFREQ_TRANSITION_NOTIFIER);
+}
+
+static inline void s3c2410fb_cpufreq_deregister(struct s3c2410fb_info *info)
+{
+	cpufreq_unregister_notifier(&info->freq_transition,
+				    CPUFREQ_TRANSITION_NOTIFIER);
+}
+
+#else
+static inline int s3c2410fb_cpufreq_register(struct s3c2410fb_info *info)
+{
+	return 0;
+}
+
+static inline void s3c2410fb_cpufreq_deregister(struct s3c2410fb_info *info)
+{
+}
+#endif
+
+
 static char driver_name[] = "s3c2410fb";
 
-static int __init s3c24xxfb_probe(struct platform_device *pdev,
+static int __devinit s3c24xxfb_probe(struct platform_device *pdev,
 				  enum s3c_drv_type drv_type)
 {
 	struct s3c2410fb_info *info;
@@ -816,7 +871,7 @@ static int __init s3c24xxfb_probe(struct platform_device *pdev,
 		goto dealloc_fb;
 	}
 
-	size = (res->end - res->start) + 1;
+	size = resource_size(res);
 	info->mem = request_mem_region(res->start, size, pdev->name);
 	if (info->mem == NULL) {
 		dev_err(&pdev->dev, "failed to get memory region\n");
@@ -868,9 +923,9 @@ static int __init s3c24xxfb_probe(struct platform_device *pdev,
 	}
 
 	info->clk = clk_get(NULL, "lcd");
-	if (!info->clk || IS_ERR(info->clk)) {
+	if (IS_ERR(info->clk)) {
 		printk(KERN_ERR "failed to get lcd clock source\n");
-		ret = -ENOENT;
+		ret = PTR_ERR(info->clk);
 		goto release_irq;
 	}
 
@@ -878,6 +933,8 @@ static int __init s3c24xxfb_probe(struct platform_device *pdev,
 	dprintk("got and enabled clock\n");
 
 	msleep(1);
+
+	info->clk_rate = clk_get_rate(info->clk);
 
 	/* find maximum required memory size for display */
 	for (i = 0; i < mach_info->num_displays; i++) {
@@ -908,11 +965,17 @@ static int __init s3c24xxfb_probe(struct platform_device *pdev,
 
 	s3c2410fb_check_var(&fbinfo->var, fbinfo);
 
+	ret = s3c2410fb_cpufreq_register(info);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "Failed to register cpufreq\n");
+		goto free_video_memory;
+	}
+
 	ret = register_framebuffer(fbinfo);
 	if (ret < 0) {
 		printk(KERN_ERR "Failed to register framebuffer device: %d\n",
 			ret);
-		goto free_video_memory;
+		goto free_cpufreq;
 	}
 
 	/* create device files */
@@ -926,6 +989,8 @@ static int __init s3c24xxfb_probe(struct platform_device *pdev,
 
 	return 0;
 
+ free_cpufreq:
+	s3c2410fb_cpufreq_deregister(info);
 free_video_memory:
 	s3c2410fb_unmap_video_memory(fbinfo);
 release_clock:
@@ -936,20 +1001,19 @@ release_irq:
 release_regs:
 	iounmap(info->io);
 release_mem:
-	release_resource(info->mem);
-	kfree(info->mem);
+	release_mem_region(res->start, size);
 dealloc_fb:
 	platform_set_drvdata(pdev, NULL);
 	framebuffer_release(fbinfo);
 	return ret;
 }
 
-static int __init s3c2410fb_probe(struct platform_device *pdev)
+static int __devinit s3c2410fb_probe(struct platform_device *pdev)
 {
 	return s3c24xxfb_probe(pdev, DRV_S3C2410);
 }
 
-static int __init s3c2412fb_probe(struct platform_device *pdev)
+static int __devinit s3c2412fb_probe(struct platform_device *pdev)
 {
 	return s3c24xxfb_probe(pdev, DRV_S3C2412);
 }
@@ -958,13 +1022,14 @@ static int __init s3c2412fb_probe(struct platform_device *pdev)
 /*
  *  Cleanup
  */
-static int s3c2410fb_remove(struct platform_device *pdev)
+static int __devexit s3c2410fb_remove(struct platform_device *pdev)
 {
 	struct fb_info *fbinfo = platform_get_drvdata(pdev);
 	struct s3c2410fb_info *info = fbinfo->par;
 	int irq;
 
 	unregister_framebuffer(fbinfo);
+	s3c2410fb_cpufreq_deregister(info);
 
 	s3c2410fb_lcd_enable(info, 0);
 	msleep(1);
@@ -982,8 +1047,7 @@ static int s3c2410fb_remove(struct platform_device *pdev)
 
 	iounmap(info->io);
 
-	release_resource(info->mem);
-	kfree(info->mem);
+	release_mem_region(info->mem->start, resource_size(info->mem));
 
 	platform_set_drvdata(pdev, NULL);
 	framebuffer_release(fbinfo);
@@ -1035,7 +1099,7 @@ static int s3c2410fb_resume(struct platform_device *dev)
 
 static struct platform_driver s3c2410fb_driver = {
 	.probe		= s3c2410fb_probe,
-	.remove		= s3c2410fb_remove,
+	.remove		= __devexit_p(s3c2410fb_remove),
 	.suspend	= s3c2410fb_suspend,
 	.resume		= s3c2410fb_resume,
 	.driver		= {
@@ -1046,7 +1110,7 @@ static struct platform_driver s3c2410fb_driver = {
 
 static struct platform_driver s3c2412fb_driver = {
 	.probe		= s3c2412fb_probe,
-	.remove		= s3c2410fb_remove,
+	.remove		= __devexit_p(s3c2410fb_remove),
 	.suspend	= s3c2410fb_suspend,
 	.resume		= s3c2410fb_resume,
 	.driver		= {
@@ -1060,7 +1124,7 @@ int __init s3c2410fb_init(void)
 	int ret = platform_driver_register(&s3c2410fb_driver);
 
 	if (ret == 0)
-		ret = platform_driver_register(&s3c2412fb_driver);;
+		ret = platform_driver_register(&s3c2412fb_driver);
 
 	return ret;
 }

@@ -12,6 +12,7 @@
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <acpi/acpi.h>
 #include <linux/ide.h>
 #include <linux/pci.h>
@@ -92,6 +93,11 @@ int ide_acpi_init(void)
 	return 0;
 }
 
+bool ide_port_acpi(ide_hwif_t *hwif)
+{
+	return ide_noacpi == 0 && hwif->acpidata;
+}
+
 /**
  * ide_get_dev_handle - finds acpi_handle and PCI device.function
  * @dev: device to locate
@@ -103,14 +109,12 @@ int ide_acpi_init(void)
  * Returns 0 on success, <0 on error.
  */
 static int ide_get_dev_handle(struct device *dev, acpi_handle *handle,
-			       acpi_integer *pcidevfn)
+			       u64 *pcidevfn)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	unsigned int bus, devnum, func;
-	acpi_integer addr;
+	u64 addr;
 	acpi_handle dev_handle;
-	struct acpi_buffer buffer = {.length = ACPI_ALLOCATE_BUFFER,
-					.pointer = NULL};
 	acpi_status status;
 	struct acpi_device_info	*dinfo = NULL;
 	int ret = -ENODEV;
@@ -119,7 +123,7 @@ static int ide_get_dev_handle(struct device *dev, acpi_handle *handle,
 	devnum = PCI_SLOT(pdev->devfn);
 	func = PCI_FUNC(pdev->devfn);
 	/* ACPI _ADR encoding for PCI bus: */
-	addr = (acpi_integer)(devnum << 16 | func);
+	addr = (u64)(devnum << 16 | func);
 
 	DEBPRINT("ENTER: pci %02x:%02x.%01x\n", bus, devnum, func);
 
@@ -129,12 +133,11 @@ static int ide_get_dev_handle(struct device *dev, acpi_handle *handle,
 		goto err;
 	}
 
-	status = acpi_get_object_info(dev_handle, &buffer);
+	status = acpi_get_object_info(dev_handle, &dinfo);
 	if (ACPI_FAILURE(status)) {
 		DEBPRINT("get_object_info for device failed\n");
 		goto err;
 	}
-	dinfo = buffer.pointer;
 	if (dinfo && (dinfo->valid & ACPI_VALID_ADR) &&
 	    dinfo->address == addr) {
 		*pcidevfn = addr;
@@ -167,7 +170,7 @@ static acpi_handle ide_acpi_hwif_get_handle(ide_hwif_t *hwif)
 {
 	struct device		*dev = hwif->gendev.parent;
 	acpi_handle		uninitialized_var(dev_handle);
-	acpi_integer		pcidevfn;
+	u64			pcidevfn;
 	acpi_handle		chan_handle;
 	int			err;
 
@@ -352,9 +355,6 @@ int ide_acpi_exec_tfs(ide_drive_t *drive)
 	unsigned long	gtf_address;
 	unsigned long	obj_loc;
 
-	if (ide_noacpi)
-		return 0;
-
 	DEBPRINT("call get_GTF, drive=%s port=%d\n", drive->name, drive->dn);
 
 	ret = do_drive_get_GTF(drive, &gtf_length, &gtf_address, &obj_loc);
@@ -389,16 +389,6 @@ void ide_acpi_get_timing(ide_hwif_t *hwif)
 	struct acpi_buffer	output;
 	union acpi_object 	*out_obj;
 
-	if (ide_noacpi)
-		return;
-
-	DEBPRINT("ENTER:\n");
-
-	if (!hwif->acpidata) {
-		DEBPRINT("no ACPI data for %s\n", hwif->name);
-		return;
-	}
-
 	/* Setting up output buffer for _GTM */
 	output.length = ACPI_ALLOCATE_BUFFER;
 	output.pointer = NULL;	/* ACPI-CA sets this; save/free it later */
@@ -426,21 +416,21 @@ void ide_acpi_get_timing(ide_hwif_t *hwif)
 
 	out_obj = output.pointer;
 	if (out_obj->type != ACPI_TYPE_BUFFER) {
-		kfree(output.pointer);
 		DEBPRINT("Run _GTM: error: "
 		       "expected object type of ACPI_TYPE_BUFFER, "
 		       "got 0x%x\n", out_obj->type);
+		kfree(output.pointer);
 		return;
 	}
 
 	if (!out_obj->buffer.length || !out_obj->buffer.pointer ||
 	    out_obj->buffer.length != sizeof(struct GTM_buffer)) {
-		kfree(output.pointer);
 		printk(KERN_ERR
 			"%s: unexpected _GTM length (0x%x)[should be 0x%zx] or "
 			"addr (0x%p)\n",
 			__func__, out_obj->buffer.length,
 			sizeof(struct GTM_buffer), out_obj->buffer.pointer);
+		kfree(output.pointer);
 		return;
 	}
 
@@ -478,16 +468,6 @@ void ide_acpi_push_timing(ide_hwif_t *hwif)
 	union acpi_object 	in_params[3];
 	struct ide_acpi_drive_link	*master = &hwif->acpidata->master;
 	struct ide_acpi_drive_link	*slave = &hwif->acpidata->slave;
-
-	if (ide_noacpi)
-		return;
-
-	DEBPRINT("ENTER:\n");
-
-	if (!hwif->acpidata) {
-		DEBPRINT("no ACPI data for %s\n", hwif->name);
-		return;
-	}
 
 	/* Give the GTM buffer + drive Identify data to the channel via the
 	 * _STM method: */
@@ -527,15 +507,10 @@ void ide_acpi_set_state(ide_hwif_t *hwif, int on)
 	ide_drive_t *drive;
 	int i;
 
-	if (ide_noacpi || ide_noacpi_psx)
+	if (ide_noacpi_psx)
 		return;
 
 	DEBPRINT("ENTER:\n");
-
-	if (!hwif->acpidata) {
-		DEBPRINT("no ACPI data for %s\n", hwif->name);
-		return;
-	}
 
 	/* channel first and then drives for power on and verse versa for power off */
 	if (on)
@@ -616,7 +591,7 @@ void ide_acpi_port_init_devices(ide_hwif_t *hwif)
 				 drive->name, err);
 	}
 
-	if (!ide_acpionboot) {
+	if (ide_noacpi || ide_acpionboot == 0) {
 		DEBPRINT("ACPI methods disabled on boot\n");
 		return;
 	}

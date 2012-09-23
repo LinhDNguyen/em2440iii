@@ -16,7 +16,7 @@
 	[--sp] = rets; \
 	[--sp] = (P5:0); \
 	sp += -12; \
-	call ___ipipe_stall_root_raw; \
+	call ___ipipe_disable_root_irqs_hw; \
 	sp += 12; \
 	(P5:0) = [sp++];
 # define CLI_INNER_NOP
@@ -28,7 +28,7 @@
 #ifdef CONFIG_IPIPE
 # define DO_STI \
 	sp += -12; \
-	call ___ipipe_unstall_root_raw; \
+	call ___ipipe_enable_root_irqs_hw; \
 	sp += 12; \
 2:	rets = [sp++];
 #else
@@ -67,7 +67,7 @@
  *  - DMA version, which do not suffer from this issue. DMA versions have
  *      different name (prefixed by dma_ ), and are located in
  *      ../kernel/bfin_dma_5xx.c
- * Using the dma related functions are recommended for transfering large
+ * Using the dma related functions are recommended for transferring large
  * buffers in/out of FIFOs.
  */
 

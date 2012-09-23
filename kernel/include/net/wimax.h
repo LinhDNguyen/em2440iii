@@ -79,7 +79,7 @@
  * drivers have to only report state changes due to external
  * conditions.
  *
- * All API operations are 'atomic', serialized thorough a mutex in the
+ * All API operations are 'atomic', serialized through a mutex in the
  * `struct wimax_dev`.
  *
  * EXPORTING TO USER SPACE THROUGH GENERIC NETLINK
@@ -195,6 +195,12 @@
  *    defining the `struct nla_policy` for each message, it has to have
  *    an array size of WIMAX_GNL_ATTR_MAX+1.
  *
+ * The op_*() function pointers will not be called if the wimax_dev is
+ * in a state <= %WIMAX_ST_UNINITIALIZED. The exception is:
+ *
+ * - op_reset: can be called at any time after wimax_dev_add() has
+ *   been called.
+ *
  * THE PIPE INTERFACE:
  *
  * This interface is kept intentionally simple. The driver can send
@@ -244,7 +250,6 @@
 
 #ifndef __NET__WIMAX_H__
 #define __NET__WIMAX_H__
-#ifdef __KERNEL__
 
 #include <linux/wimax.h>
 #include <net/genetlink.h>
@@ -253,7 +258,6 @@
 struct net_device;
 struct genl_info;
 struct wimax_dev;
-struct input_dev;
 
 /**
  * struct wimax_dev - Generic WiMAX device
@@ -281,7 +285,7 @@ struct input_dev;
  *     does not disconnect the device from the bus and return 0.
  *     If that fails, it should resort to some sort of cold or bus
  *     reset (even if it implies a bus disconnection and device
- *     dissapearance). In that case, -ENODEV should be returned to
+ *     disappearance). In that case, -ENODEV should be returned to
  *     indicate the device is gone.
  *     This operation has to be synchronous, and return only when the
  *     reset is complete. In case of having had to resort to bus/cold
@@ -293,8 +297,8 @@ struct input_dev;
  *     See wimax_reset()'s documentation.
  *
  * @name: [fill] A way to identify this device. We need to register a
- *     name with many subsystems (input for RFKILL, workqueue
- *     creation, etc). We can't use the network device name as that
+ *     name with many subsystems (rfkill, workqueue creation, etc).
+ *     We can't use the network device name as that
  *     might change and in some instances we don't know it yet (until
  *     we don't call register_netdev()). So we generate an unique one
  *     using the driver name and device bus id, place it here and use
@@ -315,9 +319,6 @@ struct input_dev;
  * @state: [private] Current state of the WiMAX device.
  *
  * @rfkill: [private] integration into the RF-Kill infrastructure.
- *
- * @rfkill_input: [private] virtual input device to process the
- *     hardware RF Kill switches.
  *
  * @rf_sw: [private] State of the software radio switch (OFF/ON)
  *
@@ -422,7 +423,6 @@ struct wimax_dev {
 	int (*op_reset)(struct wimax_dev *wimax_dev);
 
 	struct rfkill *rfkill;
-	struct input_dev *rfkill_input;
 	unsigned rf_hw;
 	unsigned rf_sw;
 	char name[32];
@@ -516,8 +516,4 @@ extern ssize_t wimax_msg_len(struct sk_buff *);
 extern int wimax_rfkill(struct wimax_dev *, enum wimax_rf_state);
 extern int wimax_reset(struct wimax_dev *);
 
-#else
-/* You might be looking for linux/wimax.h */
-#error This file should not be included from user space.
-#endif /* #ifdef __KERNEL__ */
 #endif /* #ifndef __NET__WIMAX_H__ */

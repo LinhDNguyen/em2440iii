@@ -20,6 +20,7 @@
 
 #include <linux/mtd/nand.h>
 #include <linux/mtd/partitions.h>
+#include <linux/slab.h>
 #include <linux/gpio.h>
 
 #include <asm/io.h>
@@ -147,7 +148,7 @@ static int cmx270_device_ready(struct mtd_info *mtd)
 /*
  * Main initialization routine
  */
-static int cmx270_init(void)
+static int __init cmx270_init(void)
 {
 	struct nand_chip *this;
 	const char *part_type;
@@ -237,7 +238,7 @@ static int cmx270_init(void)
 
 	/* Register the partitions */
 	pr_notice("Using %s partition definition\n", part_type);
-	ret = add_mtd_partitions(cmx270_nand_mtd, mtd_parts, mtd_parts_nb);
+	ret = mtd_device_register(cmx270_nand_mtd, mtd_parts, mtd_parts_nb);
 	if (ret)
 		goto err_scan;
 
@@ -261,7 +262,7 @@ module_init(cmx270_init);
 /*
  * Clean up routine
  */
-static void cmx270_cleanup(void)
+static void __exit cmx270_cleanup(void)
 {
 	/* Release resources, unregister device */
 	nand_release(cmx270_nand_mtd);

@@ -19,6 +19,7 @@
 #include <linux/bitops.h>
 #include <linux/nodemask.h>
 #include <linux/pfn.h>
+#include <linux/gfp.h>
 #include <asm/types.h>
 #include <asm/processor.h>
 #include <asm/page.h>
@@ -33,8 +34,6 @@ extern char _text, _etext, _edata;
 extern char __init_begin, __init_end;
 
 pgd_t swapper_pg_dir[1024];
-
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 /*
  * Cache of MMU context last used.
@@ -171,7 +170,7 @@ void __init mem_init(void)
 
 	printk(KERN_INFO "Memory: %luk/%luk available (%dk kernel code, "
 		"%dk reserved, %dk data, %dk init)\n",
-		(unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
+		nr_free_pages() << (PAGE_SHIFT-10),
 		num_physpages << (PAGE_SHIFT-10),
 		codesize >> 10,
 		reservedpages << (PAGE_SHIFT-10),

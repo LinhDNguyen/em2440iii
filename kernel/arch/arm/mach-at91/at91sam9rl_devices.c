@@ -21,15 +21,61 @@
 #include <mach/at91sam9rl.h>
 #include <mach/at91sam9rl_matrix.h>
 #include <mach/at91sam9_smc.h>
+#include <mach/at_hdmac.h>
 
 #include "generic.h"
 
 
 /* --------------------------------------------------------------------
+ *  HDMAC - AHB DMA Controller
+ * -------------------------------------------------------------------- */
+
+#if defined(CONFIG_AT_HDMAC) || defined(CONFIG_AT_HDMAC_MODULE)
+static u64 hdmac_dmamask = DMA_BIT_MASK(32);
+
+static struct at_dma_platform_data atdma_pdata = {
+	.nr_channels	= 2,
+};
+
+static struct resource hdmac_resources[] = {
+	[0] = {
+		.start	= AT91_BASE_SYS + AT91_DMA,
+		.end	= AT91_BASE_SYS + AT91_DMA + SZ_512 - 1,
+		.flags	= IORESOURCE_MEM,
+	},
+	[2] = {
+		.start	= AT91SAM9RL_ID_DMA,
+		.end	= AT91SAM9RL_ID_DMA,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device at_hdmac_device = {
+	.name		= "at_hdmac",
+	.id		= -1,
+	.dev		= {
+				.dma_mask		= &hdmac_dmamask,
+				.coherent_dma_mask	= DMA_BIT_MASK(32),
+				.platform_data		= &atdma_pdata,
+	},
+	.resource	= hdmac_resources,
+	.num_resources	= ARRAY_SIZE(hdmac_resources),
+};
+
+void __init at91_add_device_hdmac(void)
+{
+	dma_cap_set(DMA_MEMCPY, atdma_pdata.cap_mask);
+	platform_device_register(&at_hdmac_device);
+}
+#else
+void __init at91_add_device_hdmac(void) {}
+#endif
+
+/* --------------------------------------------------------------------
  *  USB HS Device (Gadget)
  * -------------------------------------------------------------------- */
 
-#if defined(CONFIG_USB_GADGET_ATMEL_USBA) || defined(CONFIG_USB_GADGET_ATMEL_USBA_MODULE)
+#if defined(CONFIG_USB_ATMEL_USBA) || defined(CONFIG_USB_ATMEL_USBA_MODULE)
 
 static struct resource usba_udc_resources[] = {
 	[0] = {
@@ -99,7 +145,7 @@ void __init at91_add_device_usba(struct usba_platform_data *data)
 	 */
 	usba_udc_data.pdata.vbus_pin = -EINVAL;
 	usba_udc_data.pdata.num_ep = ARRAY_SIZE(usba_udc_ep);
-	memcpy(usba_udc_data.ep, usba_udc_ep, sizeof(usba_udc_ep));;
+	memcpy(usba_udc_data.ep, usba_udc_ep, sizeof(usba_udc_ep));
 
 	if (data && data->vbus_pin > 0) {
 		at91_set_gpio_input(data->vbus_pin, 0);
@@ -108,10 +154,6 @@ void __init at91_add_device_usba(struct usba_platform_data *data)
 	}
 
 	/* Pullup pin is handled internally by USB device peripheral */
-
-	/* Clocks */
-	at91_clock_associate("utmi_clk", &at91_usba_udc_device.dev, "hclk");
-	at91_clock_associate("udphs_clk", &at91_usba_udc_device.dev, "pclk");
 
 	platform_device_register(&at91_usba_udc_device);
 }
@@ -398,6 +440,61 @@ void __init at91_add_device_spi(struct spi_board_info *devices, int nr_devices) 
 
 
 /* --------------------------------------------------------------------
+ *  AC97
+ * -------------------------------------------------------------------- */
+
+#if defined(CONFIG_SND_ATMEL_AC97C) || defined(CONFIG_SND_ATMEL_AC97C_MODULE)
+static u64 ac97_dmamask = DMA_BIT_MASK(32);
+static struct ac97c_platform_data ac97_data;
+
+static struct resource ac97_resources[] = {
+	[0] = {
+		.start	= AT91SAM9RL_BASE_AC97C,
+		.end	= AT91SAM9RL_BASE_AC97C + SZ_16K - 1,
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= AT91SAM9RL_ID_AC97C,
+		.end	= AT91SAM9RL_ID_AC97C,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device at91sam9rl_ac97_device = {
+	.name		= "atmel_ac97c",
+	.id		= 0,
+	.dev		= {
+				.dma_mask		= &ac97_dmamask,
+				.coherent_dma_mask	= DMA_BIT_MASK(32),
+				.platform_data		= &ac97_data,
+	},
+	.resource	= ac97_resources,
+	.num_resources	= ARRAY_SIZE(ac97_resources),
+};
+
+void __init at91_add_device_ac97(struct ac97c_platform_data *data)
+{
+	if (!data)
+		return;
+
+	at91_set_A_periph(AT91_PIN_PD1, 0);	/* AC97FS */
+	at91_set_A_periph(AT91_PIN_PD2, 0);	/* AC97CK */
+	at91_set_A_periph(AT91_PIN_PD3, 0);	/* AC97TX */
+	at91_set_A_periph(AT91_PIN_PD4, 0);	/* AC97RX */
+
+	/* reset */
+	if (data->reset_pin)
+		at91_set_gpio_output(data->reset_pin, 0);
+
+	ac97_data = *data;
+	platform_device_register(&at91sam9rl_ac97_device);
+}
+#else
+void __init at91_add_device_ac97(struct ac97c_platform_data *data) {}
+#endif
+
+
+/* --------------------------------------------------------------------
  *  LCD Controller
  * -------------------------------------------------------------------- */
 
@@ -504,10 +601,6 @@ static struct platform_device at91sam9rl_tcb_device = {
 
 static void __init at91_add_device_tc(void)
 {
-	/* this chip has a separate clock and irq for each TC channel */
-	at91_clock_associate("tc0_clk", &at91sam9rl_tcb_device.dev, "t0_clk");
-	at91_clock_associate("tc1_clk", &at91sam9rl_tcb_device.dev, "t1_clk");
-	at91_clock_associate("tc2_clk", &at91sam9rl_tcb_device.dev, "t2_clk");
 	platform_device_register(&at91sam9rl_tcb_device);
 }
 #else
@@ -521,6 +614,7 @@ static void __init at91_add_device_tc(void) { }
 
 #if defined(CONFIG_TOUCHSCREEN_ATMEL_TSADCC) || defined(CONFIG_TOUCHSCREEN_ATMEL_TSADCC_MODULE)
 static u64 tsadcc_dmamask = DMA_BIT_MASK(32);
+static struct at91_tsadcc_data tsadcc_data;
 
 static struct resource tsadcc_resources[] = {
 	[0] = {
@@ -541,22 +635,27 @@ static struct platform_device at91sam9rl_tsadcc_device = {
 	.dev		= {
 				.dma_mask		= &tsadcc_dmamask,
 				.coherent_dma_mask	= DMA_BIT_MASK(32),
+				.platform_data		= &tsadcc_data,
 	},
 	.resource	= tsadcc_resources,
 	.num_resources	= ARRAY_SIZE(tsadcc_resources),
 };
 
-void __init at91_add_device_tsadcc(void)
+void __init at91_add_device_tsadcc(struct at91_tsadcc_data *data)
 {
+	if (!data)
+		return;
+
 	at91_set_A_periph(AT91_PIN_PA17, 0);	/* AD0_XR */
 	at91_set_A_periph(AT91_PIN_PA18, 0);	/* AD1_XL */
 	at91_set_A_periph(AT91_PIN_PA19, 0);	/* AD2_YT */
 	at91_set_A_periph(AT91_PIN_PA20, 0);	/* AD3_TB */
 
+	tsadcc_data = *data;
 	platform_device_register(&at91sam9rl_tsadcc_device);
 }
 #else
-void __init at91_add_device_tsadcc(void) {}
+void __init at91_add_device_tsadcc(struct at91_tsadcc_data *data) {}
 #endif
 
 
@@ -785,12 +884,10 @@ void __init at91_add_device_ssc(unsigned id, unsigned pins)
 	case AT91SAM9RL_ID_SSC0:
 		pdev = &at91sam9rl_ssc0_device;
 		configure_ssc0_pins(pins);
-		at91_clock_associate("ssc0_clk", &pdev->dev, "pclk");
 		break;
 	case AT91SAM9RL_ID_SSC1:
 		pdev = &at91sam9rl_ssc1_device;
 		configure_ssc1_pins(pins);
-		at91_clock_associate("ssc1_clk", &pdev->dev, "pclk");
 		break;
 	default:
 		return;
@@ -1034,37 +1131,34 @@ struct platform_device *atmel_default_console_device;	/* the serial console devi
 void __init at91_register_uart(unsigned id, unsigned portnr, unsigned pins)
 {
 	struct platform_device *pdev;
+	struct atmel_uart_data *pdata;
 
 	switch (id) {
 		case 0:		/* DBGU */
 			pdev = &at91sam9rl_dbgu_device;
 			configure_dbgu_pins();
-			at91_clock_associate("mck", &pdev->dev, "usart");
 			break;
 		case AT91SAM9RL_ID_US0:
 			pdev = &at91sam9rl_uart0_device;
 			configure_usart0_pins(pins);
-			at91_clock_associate("usart0_clk", &pdev->dev, "usart");
 			break;
 		case AT91SAM9RL_ID_US1:
 			pdev = &at91sam9rl_uart1_device;
 			configure_usart1_pins(pins);
-			at91_clock_associate("usart1_clk", &pdev->dev, "usart");
 			break;
 		case AT91SAM9RL_ID_US2:
 			pdev = &at91sam9rl_uart2_device;
 			configure_usart2_pins(pins);
-			at91_clock_associate("usart2_clk", &pdev->dev, "usart");
 			break;
 		case AT91SAM9RL_ID_US3:
 			pdev = &at91sam9rl_uart3_device;
 			configure_usart3_pins(pins);
-			at91_clock_associate("usart3_clk", &pdev->dev, "usart");
 			break;
 		default:
 			return;
 	}
-	pdev->id = portnr;		/* update to mapped ID */
+	pdata = pdev->dev.platform_data;
+	pdata->num = portnr;		/* update to mapped ID */
 
 	if (portnr < ATMEL_MAX_UART)
 		at91_uarts[portnr] = pdev;
@@ -1072,8 +1166,10 @@ void __init at91_register_uart(unsigned id, unsigned portnr, unsigned pins)
 
 void __init at91_set_serial_console(unsigned portnr)
 {
-	if (portnr < ATMEL_MAX_UART)
+	if (portnr < ATMEL_MAX_UART) {
 		atmel_default_console_device = at91_uarts[portnr];
+		at91sam9rl_set_console_clock(at91_uarts[portnr]->id);
+	}
 }
 
 void __init at91_add_device_serial(void)
@@ -1103,6 +1199,7 @@ void __init at91_add_device_serial(void) {}
  */
 static int __init at91_add_standard_devices(void)
 {
+	at91_add_device_hdmac();
 	at91_add_device_rtc();
 	at91_add_device_rtt();
 	at91_add_device_watchdog();

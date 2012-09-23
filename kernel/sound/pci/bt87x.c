@@ -349,7 +349,8 @@ static struct snd_pcm_hardware snd_bt87x_digital_hw = {
 	.info = SNDRV_PCM_INFO_MMAP |
 		SNDRV_PCM_INFO_INTERLEAVED |
 		SNDRV_PCM_INFO_BLOCK_TRANSFER |
-		SNDRV_PCM_INFO_MMAP_VALID,
+		SNDRV_PCM_INFO_MMAP_VALID |
+		SNDRV_PCM_INFO_BATCH,
 	.formats = SNDRV_PCM_FMTBIT_S16_LE,
 	.rates = 0, /* set at runtime */
 	.channels_min = 2,
@@ -365,7 +366,8 @@ static struct snd_pcm_hardware snd_bt87x_analog_hw = {
 	.info = SNDRV_PCM_INFO_MMAP |
 		SNDRV_PCM_INFO_INTERLEAVED |
 		SNDRV_PCM_INFO_BLOCK_TRANSFER |
-		SNDRV_PCM_INFO_MMAP_VALID,
+		SNDRV_PCM_INFO_MMAP_VALID |
+		SNDRV_PCM_INFO_BATCH,
 	.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S8,
 	.rates = SNDRV_PCM_RATE_KNOT,
 	.rate_min = ANALOG_CLOCK / CLOCK_DIV_MAX,
@@ -635,15 +637,9 @@ static struct snd_kcontrol_new snd_bt87x_capture_boost = {
 static int snd_bt87x_capture_source_info(struct snd_kcontrol *kcontrol,
 					 struct snd_ctl_elem_info *info)
 {
-	static char *texts[3] = {"TV Tuner", "FM", "Mic/Line"};
+	static const char *const texts[3] = {"TV Tuner", "FM", "Mic/Line"};
 
-	info->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
-	info->count = 1;
-	info->value.enumerated.items = 3;
-	if (info->value.enumerated.item > 2)
-		info->value.enumerated.item = 2;
-	strcpy(info->value.enumerated.name, texts[info->value.enumerated.item]);
-	return 0;
+	return snd_ctl_enum_info(info, 1, 3, texts);
 }
 
 static int snd_bt87x_capture_source_get(struct snd_kcontrol *kcontrol,
@@ -764,7 +760,7 @@ static int __devinit snd_bt87x_create(struct snd_card *card,
 	snd_bt87x_writel(chip, REG_INT_STAT, MY_INTERRUPTS);
 
 	err = request_irq(pci->irq, snd_bt87x_interrupt, IRQF_SHARED,
-			  "Bt87x audio", chip);
+			  KBUILD_MODNAME, chip);
 	if (err < 0) {
 		snd_printk(KERN_ERR "cannot grab irq %d\n", pci->irq);
 		goto fail;
@@ -793,7 +789,7 @@ fail:
 	  .driver_data = SND_BT87X_BOARD_ ## id }
 /* driver_data is the card id for that device */
 
-static struct pci_device_id snd_bt87x_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_bt87x_ids) = {
 	/* Hauppauge WinTV series */
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x0070, 0x13eb, GENERIC),
 	/* Hauppauge WinTV series */
@@ -806,8 +802,12 @@ static struct pci_device_id snd_bt87x_ids[] = {
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x1002, 0x0001, GENERIC),
 	/* Leadtek Winfast tv 2000xp delux */
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x107d, 0x6606, GENERIC),
+	/* Pinnacle PCTV */
+	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x11bd, 0x0012, GENERIC),
 	/* Voodoo TV 200 */
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x121a, 0x3000, GENERIC),
+	/* Askey Computer Corp. MagicTView'99 */
+	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x144f, 0x3000, GENERIC),
 	/* AVerMedia Studio No. 103, 203, ...? */
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, 0x1461, 0x0003, AVPHONE98),
 	/* Prolink PixelView PV-M4900 */
@@ -888,9 +888,9 @@ static int __devinit snd_bt87x_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (!card)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	err = snd_bt87x_create(card, pci, &chip);
 	if (err < 0)
@@ -958,14 +958,14 @@ static void __devexit snd_bt87x_remove(struct pci_dev *pci)
 
 /* default entries for all Bt87x cards - it's not exported */
 /* driver_data is set to 0 to call detection */
-static struct pci_device_id snd_bt87x_default_ids[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(snd_bt87x_default_ids) = {
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_878, PCI_ANY_ID, PCI_ANY_ID, UNKNOWN),
 	BT_DEVICE(PCI_DEVICE_ID_BROOKTREE_879, PCI_ANY_ID, PCI_ANY_ID, UNKNOWN),
 	{ }
 };
 
 static struct pci_driver driver = {
-	.name = "Bt87x",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_bt87x_ids,
 	.probe = snd_bt87x_probe,
 	.remove = __devexit_p(snd_bt87x_remove),

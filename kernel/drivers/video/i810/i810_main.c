@@ -1090,8 +1090,10 @@ static int encode_fix(struct fb_fix_screeninfo *fix, struct fb_info *info)
     	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
 
     	strcpy(fix->id, "I810");
+	mutex_lock(&info->mm_lock);
     	fix->smem_start = par->fb.physical;
     	fix->smem_len = par->fb.size;
+	mutex_unlock(&info->mm_lock);
     	fix->type = FB_TYPE_PACKED_PIXELS;
     	fix->type_aux = 0;
 	fix->xpanstep = 8;
@@ -1572,7 +1574,7 @@ static int i810fb_suspend(struct pci_dev *dev, pm_message_t mesg)
 		return 0;
 	}
 
-	acquire_console_sem();
+	console_lock();
 	fb_set_suspend(info, 1);
 
 	if (info->fbops->fb_sync)
@@ -1585,7 +1587,7 @@ static int i810fb_suspend(struct pci_dev *dev, pm_message_t mesg)
 	pci_save_state(dev);
 	pci_disable_device(dev);
 	pci_set_power_state(dev, pci_choose_state(dev, mesg));
-	release_console_sem();
+	console_unlock();
 
 	return 0;
 }
@@ -1603,7 +1605,7 @@ static int i810fb_resume(struct pci_dev *dev)
 		return 0;
 	}
 
-	acquire_console_sem();
+	console_lock();
 	pci_set_power_state(dev, PCI_D0);
 	pci_restore_state(dev);
 
@@ -1619,7 +1621,7 @@ static int i810fb_resume(struct pci_dev *dev)
 	fb_set_suspend (info, 0);
 	info->fbops->fb_blank(VESA_NO_BLANKING, info);
 fail:
-	release_console_sem();
+	console_unlock();
 	return 0;
 }
 /***********************************************************************
@@ -2058,8 +2060,7 @@ static int __devinit i810fb_init_pci (struct pci_dev *dev,
 
 	fb_var_to_videomode(&mode, &info->var);
 	fb_add_videomode(&mode, &info->modelist);
-	encode_fix(&info->fix, info); 
-	 	    
+
 	i810fb_init_ringbuffer(info);
 	err = register_framebuffer(info);
 

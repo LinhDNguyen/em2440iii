@@ -20,6 +20,8 @@ COPYRIGHT:www.embedsky.net
 #include <linux/platform_device.h>
 #include <linux/cdev.h>
 #include <linux/miscdevice.h>
+#include <linux/sched.h>
+#include <linux/gpio.h>
 
 #define DEVICE_NAME     "IRQ-Test"
 
@@ -31,21 +33,13 @@ struct button_irq_desc {
     char *name;	
 };
 
-#if !defined (CONFIG_SKY2440_IRQ_TEST)
 static struct button_irq_desc button_irqs [] = {
-	{IRQ_EINT1,	S3C2410_GPF1,	S3C2410_GPF1_EINT1,	0, "KEY1"}, /* K1 */
-	{IRQ_EINT4,	S3C2410_GPF4,	S3C2410_GPF4_EINT4,	1, "KEY2"}, /* K2 */
-	{IRQ_EINT2,	S3C2410_GPF2,	S3C2410_GPF2_EINT2,	2, "KEY3"}, /* K3 */
-	{IRQ_EINT0,	S3C2410_GPF0,	S3C2410_GPF0_EINT0,	3, "KEY4"}, /* K4 */
+	{IRQ_EINT1,	S3C2410_GPF(1),	S3C2410_GPF1_EINT1,	0, "KEY1"}, /* K1 */
+	{IRQ_EINT4,	S3C2410_GPF(4),	S3C2410_GPF4_EINT4,	1, "KEY2"}, /* K2 */
+	{IRQ_EINT2,	S3C2410_GPF(2),	S3C2410_GPF2_EINT2,	2, "KEY3"}, /* K3 */
+	{IRQ_EINT0,	S3C2410_GPF(0),	S3C2410_GPF0_EINT0,	3, "KEY4"}, /* K4 */
 };
-#else
-static struct button_irq_desc button_irqs [] = {
-	{IRQ_EINT9,	S3C2410_GPG1,	S3C2410_GPG1_EINT9,	0, "KEY1"}, /* K1 */
-	{IRQ_EINT11,	S3C2410_GPG3,	S3C2410_GPG3_EINT11,	1, "KEY2"}, /* K2 */
-	{IRQ_EINT2,	S3C2410_GPF2,	S3C2410_GPF2_EINT2,	2, "KEY3"}, /* K3 */
-	{IRQ_EINT0,	S3C2410_GPF0,	S3C2410_GPF0_EINT0,	3, "KEY4"}, /* K4 */
-};
-#endif
+
 static volatile char key_values [] = {'0', '0', '0', '0'};
 
 static DECLARE_WAIT_QUEUE_HEAD(button_waitq);
@@ -58,7 +52,7 @@ static irqreturn_t irq_interrupt(int irq, void *dev_id)
 	struct button_irq_desc *button_irqs = (struct button_irq_desc *)dev_id;
 	int down;
 
-	down = !s3c2410_gpio_getpin(button_irqs->pin);
+	down = !gpio_get_value(button_irqs->pin);
 
 	if (down != (key_values[button_irqs->number] & 1))
 	{

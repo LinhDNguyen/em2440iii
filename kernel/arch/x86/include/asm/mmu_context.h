@@ -2,7 +2,7 @@
 #define _ASM_X86_MMU_CONTEXT_H
 
 #include <asm/desc.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
 #include <asm/paravirt.h>
@@ -36,16 +36,17 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
 	unsigned cpu = smp_processor_id();
 
 	if (likely(prev != next)) {
-		/* stop flush ipis for the previous mm */
-		cpu_clear(cpu, prev->cpu_vm_mask);
 #ifdef CONFIG_SMP
 		percpu_write(cpu_tlbstate.state, TLBSTATE_OK);
 		percpu_write(cpu_tlbstate.active_mm, next);
 #endif
-		cpu_set(cpu, next->cpu_vm_mask);
+		cpumask_set_cpu(cpu, mm_cpumask(next));
 
 		/* Re-load page tables */
 		load_cr3(next->pgd);
+
+		/* stop flush ipis for the previous mm */
+		cpumask_clear_cpu(cpu, mm_cpumask(prev));
 
 		/*
 		 * load the LDT, if the LDT is different:
@@ -58,7 +59,7 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
 		percpu_write(cpu_tlbstate.state, TLBSTATE_OK);
 		BUG_ON(percpu_read(cpu_tlbstate.active_mm) != next);
 
-		if (!cpu_test_and_set(cpu, next->cpu_vm_mask)) {
+		if (!cpumask_test_and_set_cpu(cpu, mm_cpumask(next))) {
 			/* We were in lazy tlb mode and leave_mm disabled
 			 * tlb flush IPI delivery. We must reload CR3
 			 * to make sure to use no freed page tables.

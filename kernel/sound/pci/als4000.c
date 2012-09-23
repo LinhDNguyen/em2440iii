@@ -68,7 +68,6 @@
 #include <asm/io.h>
 #include <linux/init.h>
 #include <linux/pci.h>
-#include <linux/slab.h>
 #include <linux/gameport.h>
 #include <linux/moduleparam.h>
 #include <linux/dma-mapping.h>
@@ -117,7 +116,7 @@ struct snd_card_als4000 {
 #endif
 };
 
-static struct pci_device_id snd_als4000_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_als4000_ids) = {
 	{ 0x4005, 0x4000, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },   /* ALS4000 */
 	{ 0, }
 };
@@ -764,9 +763,9 @@ static void snd_als4000_configure(struct snd_sb *chip)
 	/* SPECS_PAGE: 39 */
 	for (i = ALS4K_GCR91_DMA0_ADDR; i <= ALS4K_GCR96_DMA3_MODE_COUNT; ++i)
 		snd_als4k_gcr_write(chip, i, 0);
-	
+	/* enable burst mode to prevent dropouts during high PCI bus usage */
 	snd_als4k_gcr_write(chip, ALS4K_GCR99_DMA_EMULATION_CTRL,
-		snd_als4k_gcr_read(chip, ALS4K_GCR99_DMA_EMULATION_CTRL));
+		(snd_als4k_gcr_read(chip, ALS4K_GCR99_DMA_EMULATION_CTRL) & ~0x07) | 0x04);
 	spin_unlock_irq(&chip->reg_lock);
 }
 
@@ -872,8 +871,8 @@ static int __devinit snd_card_als4000_probe(struct pci_dev *pci,
 		return err;
 	}
 	/* check, if we can restrict PCI DMA transfers to 24 bits */
-	if (pci_set_dma_mask(pci, DMA_24BIT_MASK) < 0 ||
-	    pci_set_consistent_dma_mask(pci, DMA_24BIT_MASK) < 0) {
+	if (pci_set_dma_mask(pci, DMA_BIT_MASK(24)) < 0 ||
+	    pci_set_consistent_dma_mask(pci, DMA_BIT_MASK(24)) < 0) {
 		snd_printk(KERN_ERR "architecture does not support 24bit PCI busmaster DMA\n");
 		pci_disable_device(pci);
 		return -ENXIO;
@@ -889,12 +888,13 @@ static int __devinit snd_card_als4000_probe(struct pci_dev *pci,
 	pci_write_config_word(pci, PCI_COMMAND, word | PCI_COMMAND_IO);
 	pci_set_master(pci);
 	
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 
-			    sizeof(*acard) /* private_data: acard */);
-	if (card == NULL) {
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 
+			      sizeof(*acard) /* private_data: acard */,
+			      &card);
+	if (err < 0) {
 		pci_release_regions(pci);
 		pci_disable_device(pci);
-		return -ENOMEM;
+		return err;
 	}
 
 	acard = card->private_data;
@@ -1036,7 +1036,7 @@ static int snd_als4000_resume(struct pci_dev *pci)
 
 
 static struct pci_driver driver = {
-	.name = "ALS4000",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_als4000_ids,
 	.probe = snd_card_als4000_probe,
 	.remove = __devexit_p(snd_card_als4000_remove),

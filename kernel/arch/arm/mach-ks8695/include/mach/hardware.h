@@ -17,6 +17,11 @@
 #include <asm/sizes.h>
 
 /*
+ * Clocks are derived from MCLK, which is 25Mhz
+ */
+#define KS8695_CLOCK_RATE	25000000
+
+/*
  * Physical RAM address.
  */
 #define KS8695_SDRAM_PA		0x00000000
@@ -36,14 +41,5 @@
 
 #define KS8695_PCIIO_PA		0x80000000
 #define KS8695_PCIIO_SIZE	SZ_64K
-
-
-/*
- * PCI support
- */
-#define pcibios_assign_all_busses()	1
-
-#define PCIBIOS_MIN_IO		0
-#define PCIBIOS_MIN_MEM		0
 
 #endif

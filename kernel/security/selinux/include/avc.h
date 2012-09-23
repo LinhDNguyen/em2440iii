@@ -13,8 +13,8 @@
 #include <linux/spinlock.h>
 #include <linux/init.h>
 #include <linux/audit.h>
+#include <linux/lsm_audit.h>
 #include <linux/in6.h>
-#include <linux/path.h>
 #include <asm/system.h>
 #include "flask.h"
 #include "av_permissions.h"
@@ -36,54 +36,11 @@ struct inode;
 struct sock;
 struct sk_buff;
 
-/* Auxiliary data to use in generating the audit record. */
-struct avc_audit_data {
-	char    type;
-#define AVC_AUDIT_DATA_FS   1
-#define AVC_AUDIT_DATA_NET  2
-#define AVC_AUDIT_DATA_CAP  3
-#define AVC_AUDIT_DATA_IPC  4
-	struct task_struct *tsk;
-	union 	{
-		struct {
-			struct path path;
-			struct inode *inode;
-		} fs;
-		struct {
-			int netif;
-			struct sock *sk;
-			u16 family;
-			__be16 dport;
-			__be16 sport;
-			union {
-				struct {
-					__be32 daddr;
-					__be32 saddr;
-				} v4;
-				struct {
-					struct in6_addr daddr;
-					struct in6_addr saddr;
-				} v6;
-			} fam;
-		} net;
-		int cap;
-		int ipc_id;
-	} u;
-};
-
-#define v4info fam.v4
-#define v6info fam.v6
-
-/* Initialize an AVC audit data structure. */
-#define AVC_AUDIT_DATA_INIT(_d,_t) \
-	{ memset((_d), 0, sizeof(struct avc_audit_data)); (_d)->type = AVC_AUDIT_DATA_##_t; }
-
 /*
  * AVC statistics
  */
 struct avc_cache_stats {
 	unsigned int lookups;
-	unsigned int hits;
 	unsigned int misses;
 	unsigned int allocations;
 	unsigned int reclaims;
@@ -96,9 +53,11 @@ struct avc_cache_stats {
 
 void __init avc_init(void);
 
-void avc_audit(u32 ssid, u32 tsid,
+int avc_audit(u32 ssid, u32 tsid,
 	       u16 tclass, u32 requested,
-	       struct av_decision *avd, int result, struct avc_audit_data *auditdata);
+	       struct av_decision *avd,
+	       int result,
+	      struct common_audit_data *a, unsigned flags);
 
 #define AVC_STRICT 1 /* Ignore permissive mode. */
 int avc_has_perm_noaudit(u32 ssid, u32 tsid,
@@ -106,9 +65,17 @@ int avc_has_perm_noaudit(u32 ssid, u32 tsid,
 			 unsigned flags,
 			 struct av_decision *avd);
 
-int avc_has_perm(u32 ssid, u32 tsid,
-		 u16 tclass, u32 requested,
-		 struct avc_audit_data *auditdata);
+int avc_has_perm_flags(u32 ssid, u32 tsid,
+		       u16 tclass, u32 requested,
+		       struct common_audit_data *auditdata,
+		       unsigned);
+
+static inline int avc_has_perm(u32 ssid, u32 tsid,
+			       u16 tclass, u32 requested,
+			       struct common_audit_data *auditdata)
+{
+	return avc_has_perm_flags(ssid, tsid, tclass, requested, auditdata, 0);
+}
 
 u32 avc_policy_seqno(void);
 
@@ -127,12 +94,12 @@ int avc_add_callback(int (*callback)(u32 event, u32 ssid, u32 tsid,
 		     u32 events, u32 ssid, u32 tsid,
 		     u16 tclass, u32 perms);
 
-/* Shows permission in human readable form */
-void avc_dump_av(struct audit_buffer *ab, u16 tclass, u32 av);
-
 /* Exported to selinuxfs */
 int avc_get_hash_stats(char *page);
 extern unsigned int avc_cache_threshold;
+
+/* Attempt to free avc node cache */
+void avc_disable(void);
 
 #ifdef CONFIG_SECURITY_SELINUX_AVC_STATS
 DECLARE_PER_CPU(struct avc_cache_stats, avc_cache_stats);

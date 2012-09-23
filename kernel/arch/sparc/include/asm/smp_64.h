@@ -27,7 +27,7 @@
  */
 
 #include <linux/bitops.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/percpu.h>
 
 DECLARE_PER_CPU(cpumask_t, cpu_sibling_map);
@@ -36,7 +36,6 @@ extern int sparc64_multi_core;
 
 extern void arch_send_call_function_single_ipi(int cpu);
 extern void arch_send_call_function_ipi_mask(const struct cpumask *mask);
-#define arch_send_call_function_ipi_mask arch_send_call_function_ipi_mask
 
 /*
  *	General functions that each host system must provide.
@@ -49,6 +48,10 @@ extern void smp_fill_in_sib_core_maps(void);
 extern void cpu_play_dead(void);
 
 extern void smp_fetch_global_regs(void);
+
+struct seq_file;
+void smp_bogo(struct seq_file *);
+void smp_info(struct seq_file *);
 
 #ifdef CONFIG_HOTPLUG_CPU
 extern int __cpu_disable(void);

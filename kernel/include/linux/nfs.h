@@ -25,8 +25,11 @@
 #define NFSMODE_SOCK	0140000
 #define NFSMODE_FIFO	0010000
 
-#define NFS_MNT_PROGRAM	100005
-#define NFS_MNT_PORT	627
+#define NFS_MNT_PROGRAM		100005
+#define NFS_MNT_VERSION		1
+#define NFS_MNT3_VERSION	3
+
+#define NFS_PIPE_DIRNAME "/nfs"
 
 /*
  * NFS stats. The good thing with these values is that NFSv3 errors are

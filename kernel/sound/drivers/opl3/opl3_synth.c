@@ -19,6 +19,7 @@
  *
  */
 
+#include <linux/slab.h>
 #include <sound/opl3.h>
 #include <sound/asound_fm.h>
 
@@ -168,7 +169,7 @@ int snd_opl3_ioctl(struct snd_hwdep * hw, struct file *file,
 
 #ifdef CONFIG_SND_DEBUG
 	default:
-		snd_printk("unknown IOCTL: 0x%x\n", cmd);
+		snd_printk(KERN_WARNING "unknown IOCTL: 0x%x\n", cmd);
 #endif
 	}
 	return -ENOTTY;

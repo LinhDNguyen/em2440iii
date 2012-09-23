@@ -38,6 +38,7 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv6.h>
+#include <linux/slab.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/skbuff.h>
@@ -45,7 +46,7 @@
 #include <net/xfrm.h>
 #include <net/checksum.h>
 #include <net/udp.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #include "avc.h"
 #include "objsec.h"
@@ -111,7 +112,7 @@ int selinux_xfrm_policy_lookup(struct xfrm_sec_ctx *ctx, u32 fl_secid, u8 dir)
  */
 
 int selinux_xfrm_state_pol_flow_match(struct xfrm_state *x, struct xfrm_policy *xp,
-			struct flowi *fl)
+			const struct flowi *fl)
 {
 	u32 state_sid;
 	int rc;
@@ -134,10 +135,10 @@ int selinux_xfrm_state_pol_flow_match(struct xfrm_state *x, struct xfrm_policy *
 
 	state_sid = x->security->ctx_sid;
 
-	if (fl->secid != state_sid)
+	if (fl->flowi_secid != state_sid)
 		return 0;
 
-	rc = avc_has_perm(fl->secid, state_sid, SECCLASS_ASSOCIATION,
+	rc = avc_has_perm(fl->flowi_secid, state_sid, SECCLASS_ASSOCIATION,
 			  ASSOCIATION__SENDTO,
 			  NULL)? 0:1;
 
@@ -207,7 +208,7 @@ static int selinux_xfrm_sec_ctx_alloc(struct xfrm_sec_ctx **ctxp,
 	if (!uctx)
 		goto not_from_user;
 
-	if (uctx->ctx_doi != XFRM_SC_ALG_SELINUX)
+	if (uctx->ctx_alg != XFRM_SC_ALG_SELINUX)
 		return -EINVAL;
 
 	str_len = uctx->ctx_len;
@@ -401,7 +402,7 @@ int selinux_xfrm_state_delete(struct xfrm_state *x)
  * gone thru the IPSec process.
  */
 int selinux_xfrm_sock_rcv_skb(u32 isec_sid, struct sk_buff *skb,
-				struct avc_audit_data *ad)
+				struct common_audit_data *ad)
 {
 	int i, rc = 0;
 	struct sec_path *sp;
@@ -442,12 +443,12 @@ int selinux_xfrm_sock_rcv_skb(u32 isec_sid, struct sk_buff *skb,
  * checked in the selinux_xfrm_state_pol_flow_match hook above.
  */
 int selinux_xfrm_postroute_last(u32 isec_sid, struct sk_buff *skb,
-					struct avc_audit_data *ad, u8 proto)
+					struct common_audit_data *ad, u8 proto)
 {
 	struct dst_entry *dst;
 	int rc = 0;
 
-	dst = skb->dst;
+	dst = skb_dst(skb);
 
 	if (dst) {
 		struct dst_entry *dst_test;

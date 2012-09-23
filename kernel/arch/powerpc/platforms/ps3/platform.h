@@ -43,6 +43,7 @@ void ps3_mm_shutdown(void);
 void ps3_init_IRQ(void);
 void ps3_shutdown_IRQ(int cpu);
 void __init ps3_register_ipi_debug_brk(unsigned int cpu, unsigned int virq);
+void __init ps3_register_ipi_irq(unsigned int cpu, unsigned int virq);
 
 /* smp */
 
@@ -231,15 +232,5 @@ int ps3_repository_read_spu_resource_id(unsigned int res_index,
 
 int ps3_repository_read_vuart_av_port(unsigned int *port);
 int ps3_repository_read_vuart_sysmgr_port(unsigned int *port);
-
-/* Page table entries */
-#define IOPTE_PP_W		0x8000000000000000ul /* protection: write */
-#define IOPTE_PP_R		0x4000000000000000ul /* protection: read */
-#define IOPTE_M			0x2000000000000000ul /* coherency required */
-#define IOPTE_SO_R		0x1000000000000000ul /* ordering: writes */
-#define IOPTE_SO_RW             0x1800000000000000ul /* ordering: r & w */
-#define IOPTE_RPN_Mask		0x07fffffffffff000ul /* RPN */
-#define IOPTE_H			0x0000000000000800ul /* cache hint */
-#define IOPTE_IOID_Mask		0x00000000000007fful /* ioid */
 
 #endif

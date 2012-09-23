@@ -14,6 +14,9 @@
  * Example:
  *	phram=swap,64Mi,128Mi phram=test,900Mi,1Mi
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <asm/io.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -22,8 +25,6 @@
 #include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/mtd/mtd.h>
-
-#define ERROR(fmt, args...) printk(KERN_ERR "phram: " fmt , ## args)
 
 struct phram_mtd_list {
 	struct mtd_info mtd;
@@ -114,8 +115,9 @@ static void unregister_devices(void)
 	struct phram_mtd_list *this, *safe;
 
 	list_for_each_entry_safe(this, safe, &phram_list, list) {
-		del_mtd_device(&this->mtd);
+		mtd_device_unregister(&this->mtd);
 		iounmap(this->mtd.priv);
+		kfree(this->mtd.name);
 		kfree(this);
 	}
 }
@@ -132,7 +134,7 @@ static int register_device(char *name, unsigned long start, unsigned long len)
 	ret = -EIO;
 	new->mtd.priv = ioremap(start, len);
 	if (!new->mtd.priv) {
-		ERROR("ioremap failed\n");
+		pr_err("ioremap failed\n");
 		goto out1;
 	}
 
@@ -151,8 +153,8 @@ static int register_device(char *name, unsigned long start, unsigned long len)
 	new->mtd.writesize = 1;
 
 	ret = -EAGAIN;
-	if (add_mtd_device(&new->mtd)) {
-		ERROR("Failed to register new device\n");
+	if (mtd_device_register(&new->mtd, NULL, 0)) {
+		pr_err("Failed to register new device\n");
 		goto out2;
 	}
 
@@ -227,8 +229,8 @@ static inline void kill_final_newline(char *str)
 
 
 #define parse_err(fmt, args...) do {	\
-	ERROR(fmt , ## args);	\
-	return 0;		\
+	pr_err(fmt , ## args);	\
+	return 1;		\
 } while (0)
 
 static int phram_setup(const char *val, struct kernel_param *kp)
@@ -256,12 +258,8 @@ static int phram_setup(const char *val, struct kernel_param *kp)
 		parse_err("not enough arguments\n");
 
 	ret = parse_name(&name, token[0]);
-	if (ret == -ENOMEM)
-		parse_err("out of memory\n");
-	if (ret == -ENOSPC)
-		parse_err("name too long\n");
 	if (ret)
-		return 0;
+		return ret;
 
 	ret = parse_num32(&start, token[1]);
 	if (ret) {
@@ -275,9 +273,13 @@ static int phram_setup(const char *val, struct kernel_param *kp)
 		parse_err("illegal device length\n");
 	}
 
-	register_device(name, start, len);
+	ret = register_device(name, start, len);
+	if (!ret)
+		pr_info("%s device: %#x at %#x\n", name, len, start);
+	else
+		kfree(name);
 
-	return 0;
+	return ret;
 }
 
 module_param_call(phram, phram_setup, NULL, NULL, 000);

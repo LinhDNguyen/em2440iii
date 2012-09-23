@@ -19,7 +19,7 @@ void selinux_xfrm_state_free(struct xfrm_state *x);
 int selinux_xfrm_state_delete(struct xfrm_state *x);
 int selinux_xfrm_policy_lookup(struct xfrm_sec_ctx *ctx, u32 fl_secid, u8 dir);
 int selinux_xfrm_state_pol_flow_match(struct xfrm_state *x,
-			struct xfrm_policy *xp, struct flowi *fl);
+			struct xfrm_policy *xp, const struct flowi *fl);
 
 /*
  * Extract the security blob from the sock (it's actually on the socket)
@@ -41,9 +41,9 @@ static inline int selinux_xfrm_enabled(void)
 }
 
 int selinux_xfrm_sock_rcv_skb(u32 sid, struct sk_buff *skb,
-			struct avc_audit_data *ad);
+			struct common_audit_data *ad);
 int selinux_xfrm_postroute_last(u32 isec_sid, struct sk_buff *skb,
-			struct avc_audit_data *ad, u8 proto);
+			struct common_audit_data *ad, u8 proto);
 int selinux_xfrm_decode_session(struct sk_buff *skb, u32 *sid, int ckall);
 
 static inline void selinux_xfrm_notify_policyload(void)
@@ -57,13 +57,13 @@ static inline int selinux_xfrm_enabled(void)
 }
 
 static inline int selinux_xfrm_sock_rcv_skb(u32 isec_sid, struct sk_buff *skb,
-			struct avc_audit_data *ad)
+			struct common_audit_data *ad)
 {
 	return 0;
 }
 
 static inline int selinux_xfrm_postroute_last(u32 isec_sid, struct sk_buff *skb,
-			struct avc_audit_data *ad, u8 proto)
+			struct common_audit_data *ad, u8 proto)
 {
 	return 0;
 }

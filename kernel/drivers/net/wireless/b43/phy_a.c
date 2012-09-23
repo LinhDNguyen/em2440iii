@@ -5,7 +5,7 @@
 
   Copyright (c) 2005 Martin Langer <martin-langer@gmx.de>,
   Copyright (c) 2005-2007 Stefano Brivio <stefano.brivio@polimi.it>
-  Copyright (c) 2005-2008 Michael Buesch <mb@bu3sch.de>
+  Copyright (c) 2005-2008 Michael Buesch <m@bues.ch>
   Copyright (c) 2005, 2006 Danny van Dyk <kugelfang@gentoo.org>
   Copyright (c) 2005, 2006 Andreas Jaggi <andreas.jaggi@waterwave.ch>
 
@@ -25,6 +25,8 @@
   Boston, MA 02110-1301, USA.
 
 */
+
+#include <linux/slab.h>
 
 #include "b43.h"
 #include "phy_a.h"
@@ -263,7 +265,6 @@ static void hardware_pctl_init_aphy(struct b43_wldev *dev)
 
 void b43_phy_inita(struct b43_wldev *dev)
 {
-	struct ssb_bus *bus = dev->dev->bus;
 	struct b43_phy *phy = &dev->phy;
 
 	/* This lowlevel A-PHY init is also called from G-PHY init.
@@ -294,9 +295,9 @@ void b43_phy_inita(struct b43_wldev *dev)
 
 		b43_radio_init2060(dev);
 
-		if ((bus->boardinfo.vendor == SSB_BOARDVENDOR_BCM) &&
-		    ((bus->boardinfo.type == SSB_BOARD_BU4306) ||
-		     (bus->boardinfo.type == SSB_BOARD_BU4309))) {
+		if ((dev->dev->board_vendor == SSB_BOARDVENDOR_BCM) &&
+		    ((dev->dev->board_type == SSB_BOARD_BU4306) ||
+		     (dev->dev->board_type == SSB_BOARD_BU4309))) {
 			; //TODO: A PHY LO
 		}
 
@@ -309,7 +310,7 @@ void b43_phy_inita(struct b43_wldev *dev)
 	}
 
 	if ((phy->type == B43_PHYTYPE_G) &&
-	    (dev->dev->bus->sprom.boardflags_lo & B43_BFL_PACTRL)) {
+	    (dev->dev->bus_sprom->boardflags_lo & B43_BFL_PACTRL)) {
 		b43_phy_maskset(dev, B43_PHY_OFDM(0x6E), 0xE000, 0x3CF);
 	}
 }
@@ -321,17 +322,17 @@ static int b43_aphy_init_tssi2dbm_table(struct b43_wldev *dev)
 	struct b43_phy_a *aphy = phy->a;
 	s16 pab0, pab1, pab2;
 
-	pab0 = (s16) (dev->dev->bus->sprom.pa1b0);
-	pab1 = (s16) (dev->dev->bus->sprom.pa1b1);
-	pab2 = (s16) (dev->dev->bus->sprom.pa1b2);
+	pab0 = (s16) (dev->dev->bus_sprom->pa1b0);
+	pab1 = (s16) (dev->dev->bus_sprom->pa1b1);
+	pab2 = (s16) (dev->dev->bus_sprom->pa1b2);
 
 	if (pab0 != 0 && pab1 != 0 && pab2 != 0 &&
 	    pab0 != -1 && pab1 != -1 && pab2 != -1) {
 		/* The pabX values are set in SPROM. Use them. */
-		if ((s8) dev->dev->bus->sprom.itssi_a != 0 &&
-		    (s8) dev->dev->bus->sprom.itssi_a != -1)
+		if ((s8) dev->dev->bus_sprom->itssi_a != 0 &&
+		    (s8) dev->dev->bus_sprom->itssi_a != -1)
 			aphy->tgt_idle_tssi =
-			    (s8) (dev->dev->bus->sprom.itssi_a);
+			    (s8) (dev->dev->bus_sprom->itssi_a);
 		else
 			aphy->tgt_idle_tssi = 62;
 		aphy->tssi2dbm = b43_generate_dyn_tssi2dbm_tab(dev, pab0,
@@ -480,11 +481,11 @@ static bool b43_aphy_op_supports_hwpctl(struct b43_wldev *dev)
 }
 
 static void b43_aphy_op_software_rfkill(struct b43_wldev *dev,
-					enum rfkill_state state)
+					bool blocked)
 {
 	struct b43_phy *phy = &dev->phy;
 
-	if (state == RFKILL_STATE_UNBLOCKED) {
+	if (!blocked) {
 		if (phy->radio_on)
 			return;
 		b43_radio_write16(dev, 0x0004, 0x00C0);
@@ -518,58 +519,40 @@ static unsigned int b43_aphy_op_get_default_chan(struct b43_wldev *dev)
 static void b43_aphy_op_set_rx_antenna(struct b43_wldev *dev, int antenna)
 {//TODO
 	struct b43_phy *phy = &dev->phy;
-	u64 hf;
 	u16 tmp;
 	int autodiv = 0;
 
 	if (antenna == B43_ANTENNA_AUTO0 || antenna == B43_ANTENNA_AUTO1)
 		autodiv = 1;
 
-	hf = b43_hf_read(dev);
-	hf &= ~B43_HF_ANTDIVHELP;
-	b43_hf_write(dev, hf);
+	b43_hf_write(dev, b43_hf_read(dev) & ~B43_HF_ANTDIVHELP);
 
-	tmp = b43_phy_read(dev, B43_PHY_BBANDCFG);
-	tmp &= ~B43_PHY_BBANDCFG_RXANT;
-	tmp |= (autodiv ? B43_ANTENNA_AUTO0 : antenna)
-	    << B43_PHY_BBANDCFG_RXANT_SHIFT;
-	b43_phy_write(dev, B43_PHY_BBANDCFG, tmp);
+	b43_phy_maskset(dev, B43_PHY_BBANDCFG, ~B43_PHY_BBANDCFG_RXANT,
+			(autodiv ? B43_ANTENNA_AUTO1 : antenna) <<
+			B43_PHY_BBANDCFG_RXANT_SHIFT);
 
 	if (autodiv) {
 		tmp = b43_phy_read(dev, B43_PHY_ANTDWELL);
-		if (antenna == B43_ANTENNA_AUTO0)
+		if (antenna == B43_ANTENNA_AUTO1)
 			tmp &= ~B43_PHY_ANTDWELL_AUTODIV1;
 		else
 			tmp |= B43_PHY_ANTDWELL_AUTODIV1;
 		b43_phy_write(dev, B43_PHY_ANTDWELL, tmp);
 	}
-	if (phy->rev < 3) {
-		tmp = b43_phy_read(dev, B43_PHY_ANTDWELL);
-		tmp = (tmp & 0xFF00) | 0x24;
-		b43_phy_write(dev, B43_PHY_ANTDWELL, tmp);
-	} else {
-		tmp = b43_phy_read(dev, B43_PHY_OFDM61);
-		tmp |= 0x10;
-		b43_phy_write(dev, B43_PHY_OFDM61, tmp);
-		if (phy->analog == 3) {
-			b43_phy_write(dev, B43_PHY_CLIPPWRDOWNT,
-				      0x1D);
-			b43_phy_write(dev, B43_PHY_ADIVRELATED,
-				      8);
+	if (phy->rev < 3)
+		b43_phy_maskset(dev, B43_PHY_ANTDWELL, 0xFF00, 0x24);
+	else {
+		b43_phy_set(dev, B43_PHY_OFDM61, 0x10);
+		if (phy->rev == 3) {
+			b43_phy_write(dev, B43_PHY_CLIPPWRDOWNT, 0x1D);
+			b43_phy_write(dev, B43_PHY_ADIVRELATED, 8);
 		} else {
-			b43_phy_write(dev, B43_PHY_CLIPPWRDOWNT,
-				      0x3A);
-			tmp =
-			    b43_phy_read(dev,
-					 B43_PHY_ADIVRELATED);
-			tmp = (tmp & 0xFF00) | 8;
-			b43_phy_write(dev, B43_PHY_ADIVRELATED,
-				      tmp);
+			b43_phy_write(dev, B43_PHY_CLIPPWRDOWNT, 0x3A);
+			b43_phy_maskset(dev, B43_PHY_ADIVRELATED, 0xFF00, 8);
 		}
 	}
 
-	hf |= B43_HF_ANTDIVHELP;
-	b43_hf_write(dev, hf);
+	b43_hf_write(dev, b43_hf_read(dev) | B43_HF_ANTDIVHELP);
 }
 
 static void b43_aphy_op_adjust_txpower(struct b43_wldev *dev)

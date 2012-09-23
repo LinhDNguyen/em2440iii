@@ -143,7 +143,7 @@ sys_call_table:
 	.long sys_clone			/* 120 */
 	.long sys_setdomainname
 	.long sys_newuname
-	.long sys_ni_syscall	/* sys_modify_ldt */
+	.long sys_cacheflush	/* x86: sys_modify_ldt */
 	.long sys_adjtimex
 	.long sys_mprotect		/* 125 */
 	.long sys_sigprocmask
@@ -189,7 +189,7 @@ sys_call_table:
 	.long sys_ni_syscall	/* vm86 */
 	.long sys_ni_syscall	/* old "query_module" */
 	.long sys_poll
-	.long sys_nfsservctl
+	.long sys_ni_syscall	/* was nfsservctl */
 	.long sys_setresgid16		/* 170 */
 	.long sys_getresgid16
 	.long sys_prctl
@@ -389,3 +389,16 @@ sys_call_table:
 	.long sys_inotify_init1		/* 360 */
 	.long sys_preadv
 	.long sys_pwritev
+	.long sys_rt_tgsigqueueinfo
+	.long sys_perf_event_open
+	.long sys_recvmmsg		/* 365 */
+	.long sys_accept4
+	.long sys_fanotify_init
+	.long sys_fanotify_mark
+	.long sys_prlimit64
+	.long sys_name_to_handle_at	/* 370 */
+	.long sys_open_by_handle_at
+	.long sys_clock_adjtime
+	.long sys_syncfs
+	.long sys_sendmmsg
+	.long sys_setns			/* 375 */

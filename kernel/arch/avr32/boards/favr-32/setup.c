@@ -72,6 +72,10 @@ static struct ads7846_platform_data ads7843_data = {
 	.debounce_max		= 20,
 	.debounce_rep		= 4,
 	.debounce_tol		= 5,
+
+	.keep_vref_on		= true,
+	.settle_delay_usecs	= 500,
+	.penirq_recheck_delay_usecs = 100,
 };
 
 static struct spi_board_info __initdata spi1_board_info[] = {
@@ -202,7 +206,7 @@ static void __init set_hw_addr(struct platform_device *pdev)
 	 */
 	regs = (void __iomem __force *)res->start;
 	pclk = clk_get(&pdev->dev, "pclk");
-	if (!pclk)
+	if (IS_ERR(pclk))
 		return;
 
 	clk_enable(pclk);

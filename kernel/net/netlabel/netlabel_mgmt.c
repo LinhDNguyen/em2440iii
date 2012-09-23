@@ -5,7 +5,7 @@
  * NetLabel system manages static and dynamic label mappings for network
  * protocols such as CIPSO and RIPSO.
  *
- * Author: Paul Moore <paul.moore@hp.com>
+ * Author: Paul Moore <paul@paul-moore.com>
  *
  */
 
@@ -34,6 +34,7 @@
 #include <linux/skbuff.h>
 #include <linux/in.h>
 #include <linux/in6.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/netlink.h>
 #include <net/genetlink.h>
@@ -41,7 +42,7 @@
 #include <net/ipv6.h>
 #include <net/netlabel.h>
 #include <net/cipso_ipv4.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #include "netlabel_domainhash.h"
 #include "netlabel_user.h"
@@ -258,7 +259,7 @@ add_failure:
  *
  * Description:
  * This function is a helper function used by the LISTALL and LISTDEF command
- * handlers.  The caller is responsibile for ensuring that the RCU read lock
+ * handlers.  The caller is responsible for ensuring that the RCU read lock
  * is held.  Returns zero on success, negative values on failure.
  *
  */
@@ -779,18 +780,6 @@ static struct genl_ops netlbl_mgmt_genl_ops[] = {
  */
 int __init netlbl_mgmt_genl_init(void)
 {
-	int ret_val, i;
-
-	ret_val = genl_register_family(&netlbl_mgmt_gnl_family);
-	if (ret_val != 0)
-		return ret_val;
-
-	for (i = 0; i < ARRAY_SIZE(netlbl_mgmt_genl_ops); i++) {
-		ret_val = genl_register_ops(&netlbl_mgmt_gnl_family,
-				&netlbl_mgmt_genl_ops[i]);
-		if (ret_val != 0)
-			return ret_val;
-	}
-
-	return 0;
+	return genl_register_family_with_ops(&netlbl_mgmt_gnl_family,
+		netlbl_mgmt_genl_ops, ARRAY_SIZE(netlbl_mgmt_genl_ops));
 }

@@ -65,18 +65,21 @@ Install kexec-tools
 
 2) Download the kexec-tools user-space package from the following URL:
 
-http://www.kernel.org/pub/linux/kernel/people/horms/kexec-tools/kexec-tools.tar.gz
+http://kernel.org/pub/linux/utils/kernel/kexec/kexec-tools.tar.gz
 
 This is a symlink to the latest version.
 
 The latest kexec-tools git tree is available at:
 
-git://git.kernel.org/pub/scm/linux/kernel/git/horms/kexec-tools.git
-or
-http://www.kernel.org/git/?p=linux/kernel/git/horms/kexec-tools.git
+git://git.kernel.org/pub/scm/utils/kernel/kexec/kexec-tools.git
+and
+http://www.kernel.org/pub/scm/utils/kernel/kexec/kexec-tools.git
+
+There is also a gitweb interface available at
+http://www.kernel.org/git/?p=utils/kernel/kexec/kexec-tools.git
 
 More information about kexec-tools can be found at
-http://www.kernel.org/pub/linux/kernel/people/horms/kexec-tools/README.html
+http://www.kernel.org/pub/linux/utils/kernel/kexec/README.html
 
 3) Unpack the tarball with the tar command, as follows:
 
@@ -108,7 +111,7 @@ There are two possible methods of using Kdump.
 
 2) Or use the system kernel binary itself as dump-capture kernel and there is
    no need to build a separate dump-capture kernel. This is possible
-   only with the architecutres which support a relocatable kernel. As
+   only with the architectures which support a relocatable kernel. As
    of today, i386, x86_64, ppc64 and ia64 architectures support relocatable
    kernel.
 
@@ -222,7 +225,7 @@ Dump-capture kernel config options (Arch Dependent, ia64)
 ----------------------------------------------------------
 
 - No specific options are required to create a dump-capture kernel
-  for ia64, other than those specified in the arch idependent section
+  for ia64, other than those specified in the arch independent section
   above. This means that it is possible to use the system kernel
   as a dump-capture kernel if desired.
 
@@ -439,6 +442,6 @@ To Do
 Contact
 =======
 
-Vivek Goyal (vgoyal@in.ibm.com)
+Vivek Goyal (vgoyal@redhat.com)
 Maneesh Soni (maneesh@in.ibm.com)
 

@@ -69,7 +69,6 @@ struct snd_at73c213 {
 	int				irq;
 	int				period;
 	unsigned long			bitrate;
-	struct clk			*bitclk;
 	struct ssc_device		*ssc;
 	struct spi_device		*spi;
 	u8				spi_wbuffer[2];
@@ -156,7 +155,7 @@ static int snd_at73c213_set_bitrate(struct snd_at73c213 *chip)
 	if (max_tries < 1)
 		max_tries = 1;
 
-	/* ssc_div must be a power of 2. */
+	/* ssc_div must be even. */
 	ssc_div = (ssc_div + 1) & ~1UL;
 
 	if ((ssc_rate / (ssc_div * 2 * 16)) < BITRATE_MIN) {
@@ -965,12 +964,11 @@ static int __devinit snd_at73c213_probe(struct spi_device *spi)
 		return PTR_ERR(board->dac_clk);
 	}
 
-	retval = -ENOMEM;
-
 	/* Allocate "card" using some unused identifiers. */
 	snprintf(id, sizeof id, "at73c213_%d", board->ssc_id);
-	card = snd_card_new(-1, id, THIS_MODULE, sizeof(struct snd_at73c213));
-	if (!card)
+	retval = snd_card_create(-1, id, THIS_MODULE,
+				 sizeof(struct snd_at73c213), &card);
+	if (retval < 0)
 		goto out;
 
 	chip = card->private_data;
@@ -1126,6 +1124,6 @@ static void __exit at73c213_exit(void)
 }
 module_exit(at73c213_exit);
 
-MODULE_AUTHOR("Hans-Christian Egtvedt <hcegtvedt@atmel.com>");
+MODULE_AUTHOR("Hans-Christian Egtvedt <egtvedt@samfundet.no>");
 MODULE_DESCRIPTION("Sound driver for AT73C213 with Atmel SSC");
 MODULE_LICENSE("GPL");

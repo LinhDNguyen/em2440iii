@@ -24,9 +24,11 @@ COPYRIGHT:www.embedsky.net
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/miscdevice.h>
+#include <linux/gpio.h>
 
 #define DEVICE_NAME     "PWM-Test"
 
+static DEFINE_MUTEX(tq2440bzr_mutex);
 static struct semaphore lock;
 
 static int tq2440_pwm_open(struct inode *inode, struct file *file)
@@ -45,7 +47,7 @@ static int tq2440_pwm_close(struct inode *inode, struct file *file)
 }
 
 
-static int tq2440_pwm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
+static long tq2440_pwm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	unsigned long tcfg0;
 	unsigned long tcfg1;
@@ -53,10 +55,12 @@ static int tq2440_pwm_ioctl(struct inode *inode, struct file *file, unsigned int
 	unsigned long tcmpb;
 	unsigned long tcon;
 
+	mutex_lock(&tq2440bzr_mutex);
+
 	if(cmd <= 0)
 	{
-		s3c2410_gpio_cfgpin(S3C2410_GPB0, S3C2410_GPB0_OUTP);
-		s3c2410_gpio_setpin(S3C2410_GPB0, 0);
+		s3c_gpio_cfgpin(S3C2410_GPB(0), S3C_GPIO_OUTPUT);
+		gpio_set_value(S3C2410_GPB(0), 0);
 	}
 	else
 	{
@@ -64,7 +68,7 @@ static int tq2440_pwm_ioctl(struct inode *inode, struct file *file, unsigned int
 		unsigned long pclk;
 
 		//set GPB0 as tout0, pwm output
-		s3c2410_gpio_cfgpin(S3C2410_GPB0, S3C2410_GPB0_TOUT0);
+		s3c_gpio_cfgpin(S3C2410_GPB(0), S3C2410_GPB0_TOUT0);
 
 		tcon = __raw_readl(S3C2410_TCON);
 		tcfg1 = __raw_readl(S3C2410_TCFG1);
@@ -97,6 +101,8 @@ static int tq2440_pwm_ioctl(struct inode *inode, struct file *file, unsigned int
 		__raw_writel(tcon, S3C2410_TCON);
 	}
 
+	mutex_unlock(&tq2440bzr_mutex);
+
 	return 0;
 }
 
@@ -105,7 +111,7 @@ static struct file_operations dev_fops = {
     .owner	=   THIS_MODULE,
     .open	=   tq2440_pwm_open,
     .release	=   tq2440_pwm_close, 
-    .ioctl		=   tq2440_pwm_ioctl,
+    .unlocked_ioctl		=   tq2440_pwm_ioctl,
 };
 
 static struct miscdevice misc = {
@@ -118,7 +124,7 @@ static int __init dev_init(void)
 {
 	int ret;
 
-	init_MUTEX(&lock);
+	sema_init(&lock, 1);
 	ret = misc_register(&misc);
 
 	printk (DEVICE_NAME" initialized\n");

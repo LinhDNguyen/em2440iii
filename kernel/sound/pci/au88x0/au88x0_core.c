@@ -1135,7 +1135,10 @@ vortex_adbdma_setbuffers(vortex_t * vortex, int adbdma,
 			snd_pcm_sgbuf_get_addr(dma->substream, 0));
 		break;
 	}
-	//printk("vortex: cfg0 = 0x%x\nvortex: cfg1=0x%x\n", dma->cfg0, dma->cfg1);
+	/*
+	printk(KERN_DEBUG "vortex: cfg0 = 0x%x\nvortex: cfg1=0x%x\n",
+	       dma->cfg0, dma->cfg1);
+	*/
 	hwwrite(vortex->mmio, VORTEX_ADBDMA_BUFCFG0 + (adbdma << 3), dma->cfg0);
 	hwwrite(vortex->mmio, VORTEX_ADBDMA_BUFCFG1 + (adbdma << 3), dma->cfg1);
 
@@ -1246,14 +1249,22 @@ static void vortex_adbdma_resetup(vortex_t *vortex, int adbdma) {
 	}
 }
 
-static int inline vortex_adbdma_getlinearpos(vortex_t * vortex, int adbdma)
+static inline int vortex_adbdma_getlinearpos(vortex_t * vortex, int adbdma)
 {
 	stream_t *dma = &vortex->dma_adb[adbdma];
-	int temp;
+	int temp, page, delta;
 
 	temp = hwread(vortex->mmio, VORTEX_ADBDMA_STAT + (adbdma << 2));
-	temp = (dma->period_virt * dma->period_bytes) + (temp & POS_MASK);
-	return (temp);
+	page = (temp & ADB_SUBBUF_MASK) >> ADB_SUBBUF_SHIFT;
+	if (dma->nr_periods >= 4)
+		delta = (page - dma->period_real) & 3;
+	else {
+		delta = (page - dma->period_real);
+		if (delta < 0)
+			delta += dma->nr_periods;
+	}
+	return (dma->period_virt + delta) * dma->period_bytes
+		+ (temp & (dma->period_bytes - 1));
 }
 
 static void vortex_adbdma_startfifo(vortex_t * vortex, int adbdma)
@@ -1495,14 +1506,13 @@ static int vortex_wtdma_getcursubuffer(vortex_t * vortex, int wtdma)
 		 POS_SHIFT) & POS_MASK);
 }
 #endif
-static int inline vortex_wtdma_getlinearpos(vortex_t * vortex, int wtdma)
+static inline int vortex_wtdma_getlinearpos(vortex_t * vortex, int wtdma)
 {
 	stream_t *dma = &vortex->dma_wt[wtdma];
 	int temp;
 
 	temp = hwread(vortex->mmio, VORTEX_WTDMA_STAT + (wtdma << 2));
-	//temp = (temp & POS_MASK) + (((temp>>WT_SUBBUF_SHIFT) & WT_SUBBUF_MASK)*(dma->cfg0&POS_MASK));
-	temp = (temp & POS_MASK) + ((dma->period_virt) * (dma->period_bytes));
+	temp = (dma->period_virt * dma->period_bytes) + (temp & (dma->period_bytes - 1));
 	return temp;
 }
 
@@ -1959,7 +1969,7 @@ vortex_connect_codecplay(vortex_t * vortex, int en, unsigned char mixers[])
 					  ADB_CODECOUT(0 + 4));
 		vortex_connection_mix_adb(vortex, en, 0x11, mixers[3],
 					  ADB_CODECOUT(1 + 4));
-		//printk("SDAC detected ");
+		/* printk(KERN_DEBUG "SDAC detected "); */
 	}
 #else
 	// Use plain direct output to codec.
@@ -2013,7 +2023,11 @@ vortex_adb_checkinout(vortex_t * vortex, int resmap[], int out, int restype)
 					resmap[restype] |= (1 << i);
 				else
 					vortex->dma_adb[i].resources[restype] |= (1 << i);
-				//printk("vortex: ResManager: type %d out %d\n", restype, i);
+				/*
+				printk(KERN_DEBUG
+				       "vortex: ResManager: type %d out %d\n",
+				       restype, i);
+				*/
 				return i;
 			}
 		}
@@ -2024,7 +2038,11 @@ vortex_adb_checkinout(vortex_t * vortex, int resmap[], int out, int restype)
 		for (i = 0; i < qty; i++) {
 			if (resmap[restype] & (1 << i)) {
 				resmap[restype] &= ~(1 << i);
-				//printk("vortex: ResManager: type %d in %d\n",restype, i);
+				/*
+				printk(KERN_DEBUG
+				       "vortex: ResManager: type %d in %d\n",
+				       restype, i);
+				*/
 				return i;
 			}
 		}
@@ -2430,7 +2448,8 @@ static irqreturn_t vortex_interrupt(int irq, void *dev_id)
 		spin_lock(&vortex->lock);
 		for (i = 0; i < NR_ADB; i++) {
 			if (vortex->dma_adb[i].fifo_status == FIFO_START) {
-				if (vortex_adbdma_bufshift(vortex, i)) ;
+				if (!vortex_adbdma_bufshift(vortex, i))
+					continue;
 				spin_unlock(&vortex->lock);
 				snd_pcm_period_elapsed(vortex->dma_adb[i].
 						       substream);
@@ -2789,7 +2808,7 @@ vortex_translateformat(vortex_t * vortex, char bits, char nch, int encod)
 {
 	int a, this_194;
 
-	if ((bits != 8) || (bits != 16))
+	if ((bits != 8) && (bits != 16))
 		return -1;
 
 	switch (encod) {

@@ -48,6 +48,7 @@
 #include <linux/init.h>
 #include <linux/jiffies.h>
 #include <linux/uaccess.h>
+#include <linux/kernel.h>
 
 #define PFX "SoftDog: "
 
@@ -71,7 +72,14 @@ static int soft_noboot = 0;
 #endif  /* ONLY_TESTING */
 
 module_param(soft_noboot, int, 0);
-MODULE_PARM_DESC(soft_noboot, "Softdog action, set to 1 to ignore reboots, 0 to reboot (default depends on ONLY_TESTING)");
+MODULE_PARM_DESC(soft_noboot,
+	"Softdog action, set to 1 to ignore reboots, 0 to reboot "
+					"(default depends on ONLY_TESTING)");
+
+static int soft_panic;
+module_param(soft_panic, int, 0);
+MODULE_PARM_DESC(soft_panic,
+	"Softdog action, set to 1 to panic, 0 to reboot (default=0)");
 
 /*
  *	Our timer
@@ -96,7 +104,10 @@ static void watchdog_fire(unsigned long data)
 
 	if (soft_noboot)
 		printk(KERN_CRIT PFX "Triggered - Reboot ignored.\n");
-	else {
+	else if (soft_panic) {
+		printk(KERN_CRIT PFX "Initiating panic.\n");
+		panic("Software Watchdog Timer expired.");
+	} else {
 		printk(KERN_CRIT PFX "Initiating system reboot.\n");
 		emergency_restart();
 		printk(KERN_CRIT PFX "Reboot didn't ?????\n");
@@ -149,7 +160,7 @@ static int softdog_release(struct inode *inode, struct file *file)
 {
 	/*
 	 *	Shut off the timer.
-	 * 	Lock it in if it's a module and we set nowayout
+	 *	Lock it in if it's a module and we set nowayout
 	 */
 	if (expect_close == 42) {
 		softdog_stop();
@@ -264,7 +275,9 @@ static struct notifier_block softdog_notifier = {
 	.notifier_call	= softdog_notify_sys,
 };
 
-static char banner[] __initdata = KERN_INFO "Software Watchdog Timer: 0.07 initialized. soft_noboot=%d soft_margin=%d sec (nowayout= %d)\n";
+static char banner[] __initdata = KERN_INFO "Software Watchdog Timer: 0.07 "
+	"initialized. soft_noboot=%d soft_margin=%d sec soft_panic=%d "
+	"(nowayout= %d)\n";
 
 static int __init watchdog_init(void)
 {
@@ -295,7 +308,7 @@ static int __init watchdog_init(void)
 		return ret;
 	}
 
-	printk(banner, soft_noboot, soft_margin, nowayout);
+	printk(banner, soft_noboot, soft_margin, soft_panic, nowayout);
 
 	return 0;
 }

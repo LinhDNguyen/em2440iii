@@ -18,6 +18,7 @@
  *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/dvb/frontend.h>
 #include <asm/types.h>
@@ -63,6 +64,7 @@ struct dvb_pll_desc {
 	void (*set)(struct dvb_frontend *fe, u8 *buf,
 		    const struct dvb_frontend_parameters *params);
 	u8   *initdata;
+	u8   *initdata2;
 	u8   *sleepdata;
 	int  count;
 	struct {
@@ -320,26 +322,73 @@ static struct dvb_pll_desc dvb_pll_philips_sd1878_tda8261 = {
 static void opera1_bw(struct dvb_frontend *fe, u8 *buf,
 		      const struct dvb_frontend_parameters *params)
 {
-	if (params->u.ofdm.bandwidth == BANDWIDTH_8_MHZ)
-		buf[2] |= 0x08;
+	struct dvb_pll_priv *priv = fe->tuner_priv;
+	u32 b_w  = (params->u.qpsk.symbol_rate * 27) / 32000;
+	struct i2c_msg msg = {
+		.addr = priv->pll_i2c_address,
+		.flags = 0,
+		.buf = buf,
+		.len = 4
+	};
+	int result;
+	u8 lpf;
+
+	if (fe->ops.i2c_gate_ctrl)
+		fe->ops.i2c_gate_ctrl(fe, 1);
+
+	result = i2c_transfer(priv->i2c, &msg, 1);
+	if (result != 1)
+		printk(KERN_ERR "%s: i2c_transfer failed:%d",
+			__func__, result);
+
+	if (b_w <= 10000)
+		lpf = 0xc;
+	else if (b_w <= 12000)
+		lpf = 0x2;
+	else if (b_w <= 14000)
+		lpf = 0xa;
+	else if (b_w <= 16000)
+		lpf = 0x6;
+	else if (b_w <= 18000)
+		lpf = 0xe;
+	else if (b_w <= 20000)
+		lpf = 0x1;
+	else if (b_w <= 22000)
+		lpf = 0x9;
+	else if (b_w <= 24000)
+		lpf = 0x5;
+	else if (b_w <= 26000)
+		lpf = 0xd;
+	else if (b_w <= 28000)
+		lpf = 0x3;
+		else
+		lpf = 0xb;
+	buf[2] ^= 0x1c; /* Flip bits 3-5 */
+	/* Set lpf */
+	buf[2] |= ((lpf >> 2) & 0x3) << 3;
+	buf[3] |= (lpf & 0x3) << 2;
+
+	return;
 }
 
 static struct dvb_pll_desc dvb_pll_opera1 = {
 	.name  = "Opera Tuner",
 	.min   =  900000,
 	.max   = 2250000,
+	.initdata = (u8[]){ 4, 0x08, 0xe5, 0xe1, 0x00 },
+	.initdata2 = (u8[]){ 4, 0x08, 0xe5, 0xe5, 0x00 },
 	.iffreq= 0,
 	.set   = opera1_bw,
 	.count = 8,
 	.entries = {
-		{ 1064000, 500, 0xe5, 0xc6 },
-		{ 1169000, 500, 0xe5, 0xe6 },
-		{ 1299000, 500, 0xe5, 0x24 },
-		{ 1444000, 500, 0xe5, 0x44 },
-		{ 1606000, 500, 0xe5, 0x64 },
-		{ 1777000, 500, 0xe5, 0x84 },
-		{ 1941000, 500, 0xe5, 0xa4 },
-		{ 2250000, 500, 0xe5, 0xc4 },
+		{ 1064000, 500, 0xf9, 0xc2 },
+		{ 1169000, 500, 0xf9, 0xe2 },
+		{ 1299000, 500, 0xf9, 0x20 },
+		{ 1444000, 500, 0xf9, 0x40 },
+		{ 1606000, 500, 0xf9, 0x60 },
+		{ 1777000, 500, 0xf9, 0x80 },
+		{ 1941000, 500, 0xf9, 0xa0 },
+		{ 2250000, 500, 0xf9, 0xc0 },
 	}
 };
 
@@ -389,6 +438,77 @@ static struct dvb_pll_desc dvb_pll_samsung_dtos403ih102a = {
 	}
 };
 
+/* Samsung TDTC9251DH0 DVB-T NIM, as used on AirStar 2 */
+static struct dvb_pll_desc dvb_pll_samsung_tdtc9251dh0 = {
+	.name	= "Samsung TDTC9251DH0",
+	.min	=  48000000,
+	.max	= 863000000,
+	.iffreq	=  36166667,
+	.count	= 3,
+	.entries = {
+		{ 157500000, 166667, 0xcc, 0x09 },
+		{ 443000000, 166667, 0xcc, 0x0a },
+		{ 863000000, 166667, 0xcc, 0x08 },
+	}
+};
+
+/* Samsung TBDU18132 DVB-S NIM with TSA5059 PLL, used in SkyStar2 DVB-S 2.3 */
+static struct dvb_pll_desc dvb_pll_samsung_tbdu18132 = {
+	.name = "Samsung TBDU18132",
+	.min	=  950000,
+	.max	= 2150000, /* guesses */
+	.iffreq = 0,
+	.count = 2,
+	.entries = {
+		{ 1550000, 125, 0x84, 0x82 },
+		{ 4095937, 125, 0x84, 0x80 },
+	}
+	/* TSA5059 PLL has a 17 bit divisor rather than the 15 bits supported
+	 * by this driver.  The two extra bits are 0x60 in the third byte.  15
+	 * bits is enough for over 4 GHz, which is enough to cover the range
+	 * of this tuner.  We could use the additional divisor bits by adding
+	 * more entries, e.g.
+	 { 0x0ffff * 125 + 125/2, 125, 0x84 | 0x20, },
+	 { 0x17fff * 125 + 125/2, 125, 0x84 | 0x40, },
+	 { 0x1ffff * 125 + 125/2, 125, 0x84 | 0x60, }, */
+};
+
+/* Samsung TBMU24112 DVB-S NIM with SL1935 zero-IF tuner */
+static struct dvb_pll_desc dvb_pll_samsung_tbmu24112 = {
+	.name = "Samsung TBMU24112",
+	.min	=  950000,
+	.max	= 2150000, /* guesses */
+	.iffreq = 0,
+	.count = 2,
+	.entries = {
+		{ 1500000, 125, 0x84, 0x18 },
+		{ 9999999, 125, 0x84, 0x08 },
+	}
+};
+
+/* Alps TDEE4 DVB-C NIM, used on Cablestar 2 */
+/* byte 4 : 1  *   *   AGD R3  R2  R1  R0
+ * byte 5 : C1 *   RE  RTS BS4 BS3 BS2 BS1
+ * AGD = 1, R3 R2 R1 R0 = 0 1 0 1 => byte 4 = 1**10101 = 0x95
+ * Range(MHz)  C1 *  RE RTS BS4 BS3 BS2 BS1  Byte 5
+ *  47 - 153   0  *  0   0   0   0   0   1   0x01
+ * 153 - 430   0  *  0   0   0   0   1   0   0x02
+ * 430 - 822   0  *  0   0   1   0   0   0   0x08
+ * 822 - 862   1  *  0   0   1   0   0   0   0x88 */
+static struct dvb_pll_desc dvb_pll_alps_tdee4 = {
+	.name = "ALPS TDEE4",
+	.min	=  47000000,
+	.max	= 862000000,
+	.iffreq	=  36125000,
+	.count = 4,
+	.entries = {
+		{ 153000000, 62500, 0x95, 0x01 },
+		{ 430000000, 62500, 0x95, 0x02 },
+		{ 822000000, 62500, 0x95, 0x08 },
+		{ 999999999, 62500, 0x95, 0x88 },
+	}
+};
+
 /* ----------------------------------------------------------- */
 
 static struct dvb_pll_desc *pll_list[] = {
@@ -402,11 +522,15 @@ static struct dvb_pll_desc *pll_list[] = {
 	[DVB_PLL_TUA6034]                = &dvb_pll_tua6034,
 	[DVB_PLL_TDA665X]                = &dvb_pll_tda665x,
 	[DVB_PLL_TDED4]                  = &dvb_pll_tded4,
+	[DVB_PLL_TDEE4]                  = &dvb_pll_alps_tdee4,
 	[DVB_PLL_TDHU2]                  = &dvb_pll_tdhu2,
 	[DVB_PLL_SAMSUNG_TBMV]           = &dvb_pll_samsung_tbmv,
 	[DVB_PLL_PHILIPS_SD1878_TDA8261] = &dvb_pll_philips_sd1878_tda8261,
 	[DVB_PLL_OPERA1]                 = &dvb_pll_opera1,
 	[DVB_PLL_SAMSUNG_DTOS403IH102A]  = &dvb_pll_samsung_dtos403ih102a,
+	[DVB_PLL_SAMSUNG_TDTC9251DH0]    = &dvb_pll_samsung_tdtc9251dh0,
+	[DVB_PLL_SAMSUNG_TBDU18132]	 = &dvb_pll_samsung_tbdu18132,
+	[DVB_PLL_SAMSUNG_TBMU24112]      = &dvb_pll_samsung_tbmu24112,
 };
 
 /* ----------------------------------------------------------- */
@@ -572,8 +696,17 @@ static int dvb_pll_init(struct dvb_frontend *fe)
 		int result;
 		if (fe->ops.i2c_gate_ctrl)
 			fe->ops.i2c_gate_ctrl(fe, 1);
-		if ((result = i2c_transfer(priv->i2c, &msg, 1)) != 1) {
+		result = i2c_transfer(priv->i2c, &msg, 1);
+		if (result != 1)
 			return result;
+		if (priv->pll_desc->initdata2) {
+			msg.buf = priv->pll_desc->initdata2 + 1;
+			msg.len = priv->pll_desc->initdata2[0];
+			if (fe->ops.i2c_gate_ctrl)
+				fe->ops.i2c_gate_ctrl(fe, 1);
+			result = i2c_transfer(priv->i2c, &msg, 1);
+			if (result != 1)
+				return result;
 		}
 		return 0;
 	}

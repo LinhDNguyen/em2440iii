@@ -50,7 +50,6 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/slab.h>
-#include <linux/kref.h>
 #include <linux/usb.h>
 #include <linux/device.h>
 #include <linux/crc32.h>
@@ -435,8 +434,6 @@ static void mcs_unwrap_mir(struct mcs_cb *mcs, __u8 *buf, int len)
 
 	mcs->netdev->stats.rx_packets++;
 	mcs->netdev->stats.rx_bytes += new_len;
-
-	return;
 }
 
 /* Unwrap received packets at FIR speed.  A 32 bit crc_ccitt checksum is
@@ -488,8 +485,6 @@ static void mcs_unwrap_fir(struct mcs_cb *mcs, __u8 *buf, int len)
 
 	mcs->netdev->stats.rx_packets++;
 	mcs->netdev->stats.rx_bytes += new_len;
-
-	return;
 }
 
 
@@ -593,7 +588,7 @@ static int mcs_speed_change(struct mcs_cb *mcs)
 
 	mcs_get_reg(mcs, MCS_MODE_REG, &rval);
 
-	/* MINRXPW values recomended by MosChip */
+	/* MINRXPW values recommended by MosChip */
 	if (mcs->new_speed <= 115200) {
 		rval &= ~MCS_FIR;
 
@@ -739,7 +734,7 @@ static int mcs_net_open(struct net_device *netdev)
 	}
 
 	if (!mcs_setup_urbs(mcs))
-	goto error3;
+		goto error3;
 
 	ret = mcs_receive_start(mcs);
 	if (ret)
@@ -804,7 +799,7 @@ static void mcs_receive_irq(struct urb *urb)
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 }
 
-/* Transmit callback funtion.  */
+/* Transmit callback function.  */
 static void mcs_send_irq(struct urb *urb)
 {
 	struct mcs_cb *mcs = urb->context;
@@ -816,17 +811,14 @@ static void mcs_send_irq(struct urb *urb)
 		netif_wake_queue(ndev);
 }
 
-/* Transmit callback funtion.  */
-static int mcs_hard_xmit(struct sk_buff *skb, struct net_device *ndev)
+/* Transmit callback function.  */
+static netdev_tx_t mcs_hard_xmit(struct sk_buff *skb,
+				       struct net_device *ndev)
 {
 	unsigned long flags;
 	struct mcs_cb *mcs;
 	int wraplen;
 	int ret = 0;
-
-
-	if (skb == NULL || ndev == NULL)
-		return -EINVAL;
 
 	netif_stop_queue(ndev);
 	mcs = netdev_priv(ndev);
@@ -870,7 +862,7 @@ static int mcs_hard_xmit(struct sk_buff *skb, struct net_device *ndev)
 
 	dev_kfree_skb(skb);
 	spin_unlock_irqrestore(&mcs->lock, flags);
-	return ret;
+	return NETDEV_TX_OK;
 }
 
 static const struct net_device_ops mcs_netdev_ops = {
@@ -967,7 +959,7 @@ static void mcs_disconnect(struct usb_interface *intf)
 	if (!mcs)
 		return;
 
-	flush_scheduled_work();
+	cancel_work_sync(&mcs->work);
 
 	unregister_netdev(mcs->netdev);
 	free_netdev(mcs->netdev);

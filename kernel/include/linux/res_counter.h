@@ -35,6 +35,10 @@ struct res_counter {
 	 */
 	unsigned long long limit;
 	/*
+	 * the limit that usage can be exceed
+	 */
+	unsigned long long soft_limit;
+	/*
 	 * the number of unsuccessful attempts to consume the resource
 	 */
 	unsigned long long failcnt;
@@ -48,6 +52,8 @@ struct res_counter {
 	 */
 	struct res_counter *parent;
 };
+
+#define RESOURCE_MAX (unsigned long long)LLONG_MAX
 
 /**
  * Helpers to interact with userspace
@@ -85,6 +91,7 @@ enum {
 	RES_MAX_USAGE,
 	RES_LIMIT,
 	RES_FAILCNT,
+	RES_SOFT_LIMIT,
 };
 
 /*
@@ -122,27 +129,44 @@ int __must_check res_counter_charge(struct res_counter *counter,
 void res_counter_uncharge_locked(struct res_counter *counter, unsigned long val);
 void res_counter_uncharge(struct res_counter *counter, unsigned long val);
 
-static inline bool res_counter_limit_check_locked(struct res_counter *cnt)
-{
-	if (cnt->usage < cnt->limit)
-		return true;
-
-	return false;
-}
-
-/*
- * Helper function to detect if the cgroup is within it's limit or
- * not. It's currently called from cgroup_rss_prepare()
+/**
+ * res_counter_margin - calculate chargeable space of a counter
+ * @cnt: the counter
+ *
+ * Returns the difference between the hard limit and the current usage
+ * of resource counter @cnt.
  */
-static inline bool res_counter_check_under_limit(struct res_counter *cnt)
+static inline unsigned long long res_counter_margin(struct res_counter *cnt)
 {
-	bool ret;
+	unsigned long long margin;
 	unsigned long flags;
 
 	spin_lock_irqsave(&cnt->lock, flags);
-	ret = res_counter_limit_check_locked(cnt);
+	margin = cnt->limit - cnt->usage;
 	spin_unlock_irqrestore(&cnt->lock, flags);
-	return ret;
+	return margin;
+}
+
+/**
+ * Get the difference between the usage and the soft limit
+ * @cnt: The counter
+ *
+ * Returns 0 if usage is less than or equal to soft limit
+ * The difference between usage and soft limit, otherwise.
+ */
+static inline unsigned long long
+res_counter_soft_limit_excess(struct res_counter *cnt)
+{
+	unsigned long long excess;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cnt->lock, flags);
+	if (cnt->usage <= cnt->soft_limit)
+		excess = 0;
+	else
+		excess = cnt->usage - cnt->soft_limit;
+	spin_unlock_irqrestore(&cnt->lock, flags);
+	return excess;
 }
 
 static inline void res_counter_reset_max(struct res_counter *cnt)
@@ -176,6 +200,18 @@ static inline int res_counter_set_limit(struct res_counter *cnt,
 	}
 	spin_unlock_irqrestore(&cnt->lock, flags);
 	return ret;
+}
+
+static inline int
+res_counter_set_soft_limit(struct res_counter *cnt,
+				unsigned long long soft_limit)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cnt->lock, flags);
+	cnt->soft_limit = soft_limit;
+	spin_unlock_irqrestore(&cnt->lock, flags);
+	return 0;
 }
 
 #endif

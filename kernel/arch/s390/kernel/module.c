@@ -45,19 +45,14 @@
 #define PLT_ENTRY_SIZE 20
 #endif /* CONFIG_64BIT */
 
-void *module_alloc(unsigned long size)
-{
-	if (size == 0)
-		return NULL;
-	return vmalloc(size);
-}
-
 /* Free memory returned from module_alloc */
 void module_free(struct module *mod, void *module_region)
 {
+	if (mod) {
+		vfree(mod->arch.syminfo);
+		mod->arch.syminfo = NULL;
+	}
 	vfree(module_region);
-	/* FIXME: If module_region == mod->init_region, trim exception
-           table entries. */
 }
 
 static void
@@ -172,15 +167,6 @@ module_frob_arch_sections(Elf_Ehdr *hdr, Elf_Shdr *sechdrs,
 	me->arch.plt_offset = me->core_size;
 	me->core_size += me->arch.plt_size;
 	return 0;
-}
-
-int
-apply_relocate(Elf_Shdr *sechdrs, const char *strtab, unsigned int symindex,
-	       unsigned int relsec, struct module *me)
-{
-	printk(KERN_ERR "module %s: RELOCATION unsupported\n",
-	       me->name);
-	return -ENOEXEC;
 }
 
 static int
@@ -404,10 +390,6 @@ int module_finalize(const Elf_Ehdr *hdr,
 		    struct module *me)
 {
 	vfree(me->arch.syminfo);
-	return module_bug_finalize(hdr, sechdrs, me);
-}
-
-void module_arch_cleanup(struct module *mod)
-{
-	module_bug_cleanup(mod);
+	me->arch.syminfo = NULL;
+	return 0;
 }

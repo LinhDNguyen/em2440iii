@@ -318,7 +318,12 @@ static void snd_ymfpci_pcm_interrupt(struct snd_ymfpci *chip, struct snd_ymfpci_
 		ypcm->period_pos += delta;
 		ypcm->last_pos = pos;
 		if (ypcm->period_pos >= ypcm->period_size) {
-			// printk("done - active_bank = 0x%x, start = 0x%x\n", chip->active_bank, voice->bank[chip->active_bank].start);
+			/*
+			printk(KERN_DEBUG
+			       "done - active_bank = 0x%x, start = 0x%x\n",
+			       chip->active_bank,
+			       voice->bank[chip->active_bank].start);
+			*/
 			ypcm->period_pos %= ypcm->period_size;
 			spin_unlock(&chip->reg_lock);
 			snd_pcm_period_elapsed(ypcm->substream);
@@ -366,7 +371,12 @@ static void snd_ymfpci_pcm_capture_interrupt(struct snd_pcm_substream *substream
 		ypcm->last_pos = pos;
 		if (ypcm->period_pos >= ypcm->period_size) {
 			ypcm->period_pos %= ypcm->period_size;
-			// printk("done - active_bank = 0x%x, start = 0x%x\n", chip->active_bank, voice->bank[chip->active_bank].start);
+			/*
+			printk(KERN_DEBUG
+			       "done - active_bank = 0x%x, start = 0x%x\n",
+			       chip->active_bank,
+			       voice->bank[chip->active_bank].start);
+			*/
 			spin_unlock(&chip->reg_lock);
 			snd_pcm_period_elapsed(substream);
 			spin_lock(&chip->reg_lock);
@@ -824,7 +834,7 @@ static irqreturn_t snd_ymfpci_interrupt(int irq, void *dev_id)
 	status = snd_ymfpci_readw(chip, YDSXGR_INTFLAG);
 	if (status & 1) {
 		if (chip->timer)
-			snd_timer_interrupt(chip->timer, chip->timer->sticks);
+			snd_timer_interrupt(chip->timer, chip->timer_ticks);
 	}
 	snd_ymfpci_writew(chip, YDSXGR_INTFLAG, status);
 
@@ -1379,15 +1389,9 @@ static struct snd_kcontrol_new snd_ymfpci_spdif_stream __devinitdata =
 
 static int snd_ymfpci_drec_source_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *info)
 {
-	static char *texts[3] = {"AC'97", "IEC958", "ZV Port"};
+	static const char *const texts[3] = {"AC'97", "IEC958", "ZV Port"};
 
-	info->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
-	info->count = 1;
-	info->value.enumerated.items = 3;
-	if (info->value.enumerated.item > 2)
-		info->value.enumerated.item = 2;
-	strcpy(info->value.enumerated.name, texts[info->value.enumerated.item]);
-	return 0;
+	return snd_ctl_enum_info(info, 1, 3, texts);
 }
 
 static int snd_ymfpci_drec_source_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *value)
@@ -1875,8 +1879,18 @@ static int snd_ymfpci_timer_start(struct snd_timer *timer)
 	unsigned int count;
 
 	chip = snd_timer_chip(timer);
-	count = (timer->sticks << 1) - 1;
 	spin_lock_irqsave(&chip->reg_lock, flags);
+	if (timer->sticks > 1) {
+		chip->timer_ticks = timer->sticks;
+		count = timer->sticks - 1;
+	} else {
+		/*
+		 * Divisor 1 is not allowed; fake it by using divisor 2 and
+		 * counting two ticks for each interrupt.
+		 */
+		chip->timer_ticks = 2;
+		count = 2 - 1;
+	}
 	snd_ymfpci_writew(chip, YDSXGR_TIMERCOUNT, count);
 	snd_ymfpci_writeb(chip, YDSXGR_TIMERCTRL, 0x03);
 	spin_unlock_irqrestore(&chip->reg_lock, flags);
@@ -1899,14 +1913,14 @@ static int snd_ymfpci_timer_precise_resolution(struct snd_timer *timer,
 					       unsigned long *num, unsigned long *den)
 {
 	*num = 1;
-	*den = 48000;
+	*den = 96000;
 	return 0;
 }
 
 static struct snd_timer_hardware snd_ymfpci_timer_hw = {
 	.flags = SNDRV_TIMER_HW_AUTO,
-	.resolution = 20833, /* 1/fs = 20.8333...us */
-	.ticks = 0x8000,
+	.resolution = 10417, /* 1 / 96 kHz = 10.41666...us */
+	.ticks = 0x10000,
 	.start = snd_ymfpci_timer_start,
 	.stop = snd_ymfpci_timer_stop,
 	.precise_resolution = snd_ymfpci_timer_precise_resolution,
@@ -2366,7 +2380,7 @@ int __devinit snd_ymfpci_create(struct snd_card *card,
 		return -EBUSY;
 	}
 	if (request_irq(pci->irq, snd_ymfpci_interrupt, IRQF_SHARED,
-			"YMFPCI", chip)) {
+			KBUILD_MODNAME, chip)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_ymfpci_free(chip);
 		return -EBUSY;

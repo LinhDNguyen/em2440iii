@@ -494,8 +494,8 @@ struct cs4281 {
 
 static irqreturn_t snd_cs4281_interrupt(int irq, void *dev_id);
 
-static struct pci_device_id snd_cs4281_ids[] = {
-	{ 0x1013, 0x6005, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },	/* CS4281 */
+static DEFINE_PCI_DEVICE_TABLE(snd_cs4281_ids) = {
+	{ PCI_VDEVICE(CIRRUS, 0x6005), 0, },	/* CS4281 */
 	{ 0, }
 };
 
@@ -834,7 +834,11 @@ static snd_pcm_uframes_t snd_cs4281_pointer(struct snd_pcm_substream *substream)
 	struct cs4281_dma *dma = runtime->private_data;
 	struct cs4281 *chip = snd_pcm_substream_chip(substream);
 
-	// printk("DCC = 0x%x, buffer_size = 0x%x, jiffies = %li\n", snd_cs4281_peekBA0(chip, dma->regDCC), runtime->buffer_size, jiffies);
+	/*
+	printk(KERN_DEBUG "DCC = 0x%x, buffer_size = 0x%x, jiffies = %li\n",
+	       snd_cs4281_peekBA0(chip, dma->regDCC), runtime->buffer_size,
+	       jiffies);
+	*/
 	return runtime->buffer_size -
 	       snd_cs4281_peekBA0(chip, dma->regDCC) - 1;
 }
@@ -1135,40 +1139,28 @@ static void snd_cs4281_proc_read(struct snd_info_entry *entry,
 	snd_iprintf(buffer, "Spurious end IRQs    : %u\n", chip->spurious_dtc_irq);
 }
 
-static long snd_cs4281_BA0_read(struct snd_info_entry *entry,
-				void *file_private_data,
-				struct file *file, char __user *buf,
-				unsigned long count, unsigned long pos)
+static ssize_t snd_cs4281_BA0_read(struct snd_info_entry *entry,
+				   void *file_private_data,
+				   struct file *file, char __user *buf,
+				   size_t count, loff_t pos)
 {
-	long size;
 	struct cs4281 *chip = entry->private_data;
 	
-	size = count;
-	if (pos + size > CS4281_BA0_SIZE)
-		size = (long)CS4281_BA0_SIZE - pos;
-	if (size > 0) {
-		if (copy_to_user_fromio(buf, chip->ba0 + pos, size))
-			return -EFAULT;
-	}
-	return size;
+	if (copy_to_user_fromio(buf, chip->ba0 + pos, count))
+		return -EFAULT;
+	return count;
 }
 
-static long snd_cs4281_BA1_read(struct snd_info_entry *entry,
-				void *file_private_data,
-				struct file *file, char __user *buf,
-				unsigned long count, unsigned long pos)
+static ssize_t snd_cs4281_BA1_read(struct snd_info_entry *entry,
+				   void *file_private_data,
+				   struct file *file, char __user *buf,
+				   size_t count, loff_t pos)
 {
-	long size;
 	struct cs4281 *chip = entry->private_data;
 	
-	size = count;
-	if (pos + size > CS4281_BA1_SIZE)
-		size = (long)CS4281_BA1_SIZE - pos;
-	if (size > 0) {
-		if (copy_to_user_fromio(buf, chip->ba1 + pos, size))
-			return -EFAULT;
-	}
-	return size;
+	if (copy_to_user_fromio(buf, chip->ba1 + pos, count))
+		return -EFAULT;
+	return count;
 }
 
 static struct snd_info_entry_ops snd_cs4281_proc_ops_BA0 = {
@@ -1390,7 +1382,7 @@ static int __devinit snd_cs4281_create(struct snd_card *card,
 	}
 	
 	if (request_irq(pci->irq, snd_cs4281_interrupt, IRQF_SHARED,
-			"CS4281", chip)) {
+			KBUILD_MODNAME, chip)) {
 		snd_printk(KERN_ERR "unable to grab IRQ %d\n", pci->irq);
 		snd_cs4281_free(chip);
 		return -ENOMEM;
@@ -1925,9 +1917,9 @@ static int __devinit snd_cs4281_probe(struct pci_dev *pci,
 		return -ENOENT;
 	}
 
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-	if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
 	if ((err = snd_cs4281_create(card, pci, &chip, dual_codec[dev])) < 0) {
 		snd_card_free(card);
@@ -2093,7 +2085,7 @@ static int cs4281_resume(struct pci_dev *pci)
 #endif /* CONFIG_PM */
 
 static struct pci_driver driver = {
-	.name = "CS4281",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_cs4281_ids,
 	.probe = snd_cs4281_probe,
 	.remove = __devexit_p(snd_cs4281_remove),

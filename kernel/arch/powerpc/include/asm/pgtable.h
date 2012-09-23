@@ -104,8 +104,8 @@ static inline void __set_pte_at(struct mm_struct *mm, unsigned long addr,
 	else
 		pte_update(ptep, ~_PAGE_HASHPTE, pte_val(pte));
 
-#elif defined(CONFIG_PPC32) && defined(CONFIG_PTE_64BIT) && defined(CONFIG_SMP)
-	/* Second case is 32-bit with 64-bit PTE in SMP mode. In this case, we
+#elif defined(CONFIG_PPC32) && defined(CONFIG_PTE_64BIT)
+	/* Second case is 32-bit with 64-bit PTE.  In this case, we
 	 * can just store as long as we do the two halves in the right order
 	 * with a barrier in between. This is possible because we take care,
 	 * in the hash code, to pre-invalidate if the PTE was already hashed,
@@ -140,7 +140,7 @@ static inline void __set_pte_at(struct mm_struct *mm, unsigned long addr,
 
 #else
 	/* Anything else just stores the PTE normally. That covers all 64-bit
-	 * cases, and 32-bit non-hash with 64-bit PTEs in UP mode
+	 * cases, and 32-bit non-hash with 32-bit PTEs.
 	 */
 	*ptep = pte;
 #endif
@@ -170,6 +170,7 @@ extern int ptep_set_access_flags(struct vm_area_struct *vma, unsigned long addre
 #define pgprot_cached_wthru(prot) (__pgprot((pgprot_val(prot) & ~_PAGE_CACHE_CTL) | \
 				            _PAGE_COHERENT | _PAGE_WRITETHRU))
 
+#define pgprot_writecombine pgprot_noncached_wc
 
 struct file;
 extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
@@ -209,7 +210,10 @@ extern void paging_init(void);
  * corresponding HPTE into the hash table ahead of time, instead of
  * waiting for the inevitable extra hash-table miss exception.
  */
-extern void update_mmu_cache(struct vm_area_struct *, unsigned long, pte_t);
+extern void update_mmu_cache(struct vm_area_struct *, unsigned long, pte_t *);
+
+extern int gup_hugepd(hugepd_t *hugepd, unsigned pdshift, unsigned long addr,
+		      unsigned long end, int write, struct page **pages, int *nr);
 
 #endif /* __ASSEMBLY__ */
 

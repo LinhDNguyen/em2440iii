@@ -11,7 +11,7 @@
 #ifndef _MPC85XX_EDAC_H_
 #define _MPC85XX_EDAC_H_
 
-#define MPC85XX_REVISION " Ver: 2.0.0 " __DATE__
+#define MPC85XX_REVISION " Ver: 2.0.0"
 #define EDAC_MOD_STR	"MPC85xx_edac"
 
 #define mpc85xx_printk(level, fmt, arg...) \
@@ -48,11 +48,15 @@
 #define DSC_MEM_EN	0x80000000
 #define DSC_ECC_EN	0x20000000
 #define DSC_RD_EN	0x10000000
+#define DSC_DBW_MASK	0x00180000
+#define DSC_DBW_32	0x00080000
+#define DSC_DBW_64	0x00000000
 
 #define DSC_SDTYPE_MASK		0x07000000
 
 #define DSC_SDTYPE_DDR		0x02000000
 #define DSC_SDTYPE_DDR2		0x03000000
+#define DSC_SDTYPE_DDR3		0x07000000
 #define DSC_X32_EN	0x00000020
 
 /* Err_Int_En */

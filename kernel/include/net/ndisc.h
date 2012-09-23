@@ -42,11 +42,6 @@ enum {
 #define ND_REACHABLE_TIME		(30*HZ)
 #define ND_RETRANS_TIMER		HZ
 
-#define ND_MIN_RANDOM_FACTOR		(1/2)
-#define ND_MAX_RANDOM_FACTOR		(3/2)
-
-#ifdef __KERNEL__
-
 #include <linux/compiler.h>
 #include <linux/icmpv6.h>
 #include <linux/in6.h>
@@ -55,7 +50,6 @@ enum {
 #include <net/neighbour.h>
 
 struct ctl_table;
-struct file;
 struct inet6_dev;
 struct net_device;
 struct net_proto_family;
@@ -83,7 +77,7 @@ struct ra_msg {
 struct nd_opt_hdr {
 	__u8		nd_opt_type;
 	__u8		nd_opt_len;
-} __attribute__((__packed__));
+} __packed;
 
 
 extern int			ndisc_init(void);
@@ -106,7 +100,8 @@ extern void			ndisc_send_redirect(struct sk_buff *skb,
 						    struct neighbour *neigh,
 						    const struct in6_addr *target);
 
-extern int			ndisc_mc_map(struct in6_addr *addr, char *buf, struct net_device *dev, int dir);
+extern int			ndisc_mc_map(const struct in6_addr *addr, char *buf,
+					     struct net_device *dev, int dir);
 
 extern struct sk_buff		*ndisc_build_skb(struct net_device *dev,
 						 const struct in6_addr *daddr,
@@ -139,7 +134,6 @@ extern int			igmp6_event_report(struct sk_buff *skb);
 #ifdef CONFIG_SYSCTL
 extern int 			ndisc_ifinfo_sysctl_change(struct ctl_table *ctl,
 							   int write,
-							   struct file * filp,
 							   void __user *buffer,
 							   size_t *lenp,
 							   loff_t *ppos);
@@ -159,9 +153,5 @@ static inline struct neighbour * ndisc_get_neigh(struct net_device *dev, const s
 
 	return ERR_PTR(-ENODEV);
 }
-
-
-#endif /* __KERNEL__ */
-
 
 #endif

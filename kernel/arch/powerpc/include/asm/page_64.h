@@ -59,24 +59,7 @@ static __inline__ void clear_page(void *addr)
 	: "ctr", "memory");
 }
 
-extern void copy_4K_page(void *to, void *from);
-
-#ifdef CONFIG_PPC_64K_PAGES
-static inline void copy_page(void *to, void *from)
-{
-	unsigned int i;
-	for (i=0; i < (1 << (PAGE_SHIFT - 12)); i++) {
-		copy_4K_page(to, from);
-		to += 4096;
-		from += 4096;
-	}
-}
-#else /* CONFIG_PPC_64K_PAGES */
-static inline void copy_page(void *to, void *from)
-{
-	copy_4K_page(to, from);
-}
-#endif /* CONFIG_PPC_64K_PAGES */
+extern void copy_page(void *to, void *from);
 
 /* Log 2 of page table size */
 extern u64 ppc64_pft_size;
@@ -90,7 +73,7 @@ extern unsigned int HPAGE_SHIFT;
 #define HPAGE_SIZE		((1UL) << HPAGE_SHIFT)
 #define HPAGE_MASK		(~(HPAGE_SIZE - 1))
 #define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT - PAGE_SHIFT)
-#define HUGE_MAX_HSTATE		3
+#define HUGE_MAX_HSTATE		(MMU_PAGE_COUNT-1)
 
 #endif /* __ASSEMBLY__ */
 
@@ -130,17 +113,27 @@ extern void slice_set_user_psize(struct mm_struct *mm, unsigned int psize);
 extern void slice_set_range_psize(struct mm_struct *mm, unsigned long start,
 				  unsigned long len, unsigned int psize);
 
-#define slice_mm_new_context(mm)	((mm)->context.id == 0)
+#define slice_mm_new_context(mm)	((mm)->context.id == MMU_NO_CONTEXT)
 
 #endif /* __ASSEMBLY__ */
 #else
 #define slice_init()
+#ifdef CONFIG_PPC_STD_MMU_64
 #define get_slice_psize(mm, addr)	((mm)->context.user_psize)
 #define slice_set_user_psize(mm, psize)		\
 do {						\
 	(mm)->context.user_psize = (psize);	\
 	(mm)->context.sllp = SLB_VSID_USER | mmu_psize_defs[(psize)].sllp; \
 } while (0)
+#else /* CONFIG_PPC_STD_MMU_64 */
+#ifdef CONFIG_PPC_64K_PAGES
+#define get_slice_psize(mm, addr)	MMU_PAGE_64K
+#else /* CONFIG_PPC_64K_PAGES */
+#define get_slice_psize(mm, addr)	MMU_PAGE_4K
+#endif /* !CONFIG_PPC_64K_PAGES */
+#define slice_set_user_psize(mm, psize)	do { BUG(); } while(0)
+#endif /* !CONFIG_PPC_STD_MMU_64 */
+
 #define slice_set_range_psize(mm, start, len, psize)	\
 	slice_set_user_psize((mm), (psize))
 #define slice_mm_new_context(mm)	1
@@ -152,22 +145,14 @@ do {						\
 
 #endif /* !CONFIG_HUGETLB_PAGE */
 
-#ifdef MODULE
-#define __page_aligned __attribute__((__aligned__(PAGE_SIZE)))
-#else
-#define __page_aligned \
-	__attribute__((__aligned__(PAGE_SIZE), \
-		__section__(".data.page_aligned")))
-#endif
-
 #define VM_DATA_DEFAULT_FLAGS \
-	(test_thread_flag(TIF_32BIT) ? \
+	(is_32bit_task() ? \
 	 VM_DATA_DEFAULT_FLAGS32 : VM_DATA_DEFAULT_FLAGS64)
 
 /*
  * This is the default if a program doesn't have a PT_GNU_STACK
  * program header entry. The PPC64 ELF ABI has a non executable stack
- * stack by default, so in the absense of a PT_GNU_STACK program header
+ * stack by default, so in the absence of a PT_GNU_STACK program header
  * we turn execute permission off.
  */
 #define VM_STACK_DEFAULT_FLAGS32	(VM_READ | VM_WRITE | VM_EXEC | \
@@ -177,9 +162,9 @@ do {						\
 					 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #define VM_STACK_DEFAULT_FLAGS \
-	(test_thread_flag(TIF_32BIT) ? \
+	(is_32bit_task() ? \
 	 VM_STACK_DEFAULT_FLAGS32 : VM_STACK_DEFAULT_FLAGS64)
 
-#include <asm-generic/page.h>
+#include <asm-generic/getorder.h>
 
 #endif /* _ASM_POWERPC_PAGE_64_H */

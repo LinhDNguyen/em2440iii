@@ -1277,7 +1277,7 @@ static irqreturn_t AtaInterrupt(int irq, void *dummy)
 		 * (almost) like on the TT.
 		 */
 		write_sq_ignore_int = 0;
-		return IRQ_HANDLED;
+		goto out;
 	}
 
 	if (!write_sq.active) {
@@ -1285,7 +1285,7 @@ static irqreturn_t AtaInterrupt(int irq, void *dummy)
 		 * the sq variables, so better don't do anything here.
 		 */
 		WAKE_UP(write_sq.sync_queue);
-		return IRQ_HANDLED;
+		goto out;
 	}
 
 	/* Probably ;) one frame is finished. Well, in fact it may be that a
@@ -1322,6 +1322,7 @@ static irqreturn_t AtaInterrupt(int irq, void *dummy)
 	/* We are not playing after AtaPlay(), so there
 	   is nothing to play any more. Wake up a process
 	   waiting for audio output to drain. */
+out:
 	spin_unlock(&dmasound.lock);
 	return IRQ_HANDLED;
 }
@@ -1524,7 +1525,7 @@ static SETTINGS def_soft = {
 	.speed	= 8000
 } ;
 
-static MACHINE machTT = {
+static __initdata MACHINE machTT = {
 	.name		= "Atari",
 	.name2		= "TT",
 	.owner		= THIS_MODULE,
@@ -1553,7 +1554,7 @@ static MACHINE machTT = {
 	.capabilities	=  DSP_CAP_BATCH	/* As per SNDCTL_DSP_GETCAPS */
 };
 
-static MACHINE machFalcon = {
+static __initdata MACHINE machFalcon = {
 	.name		= "Atari",
 	.name2		= "FALCON",
 	.dma_alloc	= AtaAlloc,

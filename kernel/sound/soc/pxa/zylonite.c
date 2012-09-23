@@ -14,17 +14,27 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/device.h>
+#include <linux/clk.h>
 #include <linux/i2c.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
-#include <sound/soc-dapm.h>
 
 #include "../codecs/wm9713.h"
-#include "pxa2xx-pcm.h"
 #include "pxa2xx-ac97.h"
 #include "pxa-ssp.h"
+
+/*
+ * There is a physical switch SW15 on the board which changes the MCLK
+ * for the WM9713 between the standard AC97 master clock and the
+ * output of the CLK_POUT signal from the PXA.
+ */
+static int clk_pout;
+module_param(clk_pout, int, 0);
+MODULE_PARM_DESC(clk_pout, "Use CLK_POUT as WM9713 MCLK (SW15 on board).");
+
+static struct clk *pout;
 
 static struct snd_soc_card zylonite;
 
@@ -59,23 +69,25 @@ static const struct snd_soc_dapm_route audio_map[] = {
 	{ "Multiactor", NULL, "SPKR" },
 };
 
-static int zylonite_wm9713_init(struct snd_soc_codec *codec)
+static int zylonite_wm9713_init(struct snd_soc_pcm_runtime *rtd)
 {
-	/* Currently we only support use of the AC97 clock here.  If
-	 * CLK_POUT is selected by SW15 then the clock API will need
-	 * to be used to request and enable it here.
-	 */
+	struct snd_soc_codec *codec = rtd->codec;
+	struct snd_soc_dapm_context *dapm = &codec->dapm;
 
-	snd_soc_dapm_new_controls(codec, zylonite_dapm_widgets,
+	if (clk_pout)
+		snd_soc_dai_set_pll(rtd->codec_dai, 0, 0,
+				    clk_get_rate(pout), 0);
+
+	snd_soc_dapm_new_controls(dapm, zylonite_dapm_widgets,
 				  ARRAY_SIZE(zylonite_dapm_widgets));
 
-	snd_soc_dapm_add_routes(codec, audio_map, ARRAY_SIZE(audio_map));
+	snd_soc_dapm_add_routes(dapm, audio_map, ARRAY_SIZE(audio_map));
 
 	/* Static setup for now */
-	snd_soc_dapm_enable_pin(codec, "Headphone");
-	snd_soc_dapm_enable_pin(codec, "Headset Earpiece");
+	snd_soc_dapm_enable_pin(dapm, "Headphone");
+	snd_soc_dapm_enable_pin(dapm, "Headset Earpiece");
 
-	snd_soc_dapm_sync(codec);
+	snd_soc_dapm_sync(dapm);
 	return 0;
 }
 
@@ -83,29 +95,53 @@ static int zylonite_voice_hw_params(struct snd_pcm_substream *substream,
 				    struct snd_pcm_hw_params *params)
 {
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai *codec_dai = rtd->dai->codec_dai;
-	struct snd_soc_dai *cpu_dai = rtd->dai->cpu_dai;
+	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
 	unsigned int pll_out = 0;
-	unsigned int acds = 0;
 	unsigned int wm9713_div = 0;
 	int ret = 0;
+	int rate = params_rate(params);
+	int width = snd_pcm_format_physical_width(params_format(params));
 
-	switch (params_rate(params)) {
+	/* Only support ratios that we can generate neatly from the AC97
+	 * based master clock - in particular, this excludes 44.1kHz.
+	 * In most applications the voice DAC will be used for telephony
+	 * data so multiples of 8kHz will be the common case.
+	 */
+	switch (rate) {
 	case 8000:
 		wm9713_div = 12;
-		pll_out = 2048000;
 		break;
 	case 16000:
 		wm9713_div = 6;
-		pll_out = 4096000;
 		break;
 	case 48000:
-	default:
 		wm9713_div = 2;
-		pll_out = 12288000;
-		acds = 1;
 		break;
+	default:
+		/* Don't support OSS emulation */
+		return -EINVAL;
 	}
+
+	/* Add 1 to the width for the leading clock cycle */
+	pll_out = rate * (width + 1) * 8;
+
+	ret = snd_soc_dai_set_sysclk(cpu_dai, PXA_SSP_CLK_AUDIO, 0, 1);
+	if (ret < 0)
+		return ret;
+
+	ret = snd_soc_dai_set_pll(cpu_dai, 0, 0, 0, pll_out);
+	if (ret < 0)
+		return ret;
+
+	if (clk_pout)
+		ret = snd_soc_dai_set_clkdiv(codec_dai, WM9713_PCMCLK_PLL_DIV,
+					     WM9713_PCMDIV(wm9713_div));
+	else
+		ret = snd_soc_dai_set_clkdiv(codec_dai, WM9713_PCMCLK_DIV,
+					     WM9713_PCMDIV(wm9713_div));
+	if (ret < 0)
+		return ret;
 
 	ret = snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_I2S |
 		SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_CBS_CFS);
@@ -114,32 +150,6 @@ static int zylonite_voice_hw_params(struct snd_pcm_substream *substream,
 
 	ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_I2S |
 		SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_CBS_CFS);
-	if (ret < 0)
-		return ret;
-
-	ret = snd_soc_dai_set_tdm_slot(cpu_dai,
-				       params_channels(params),
-				       params_channels(params));
-	if (ret < 0)
-		return ret;
-
-	ret = snd_soc_dai_set_pll(cpu_dai, 0, 0, pll_out);
-	if (ret < 0)
-		return ret;
-
-	ret = snd_soc_dai_set_clkdiv(cpu_dai, PXA_SSP_AUDIO_DIV_ACDS, acds);
-	if (ret < 0)
-		return ret;
-
-	ret = snd_soc_dai_set_sysclk(cpu_dai, PXA_SSP_CLK_AUDIO, 0, 1);
-	if (ret < 0)
-		return ret;
-
-	/* Note that if the PLL is in use the WM9713_PCMCLK_PLL_DIV needs
-	 * to be set instead.
-	 */
-	ret = snd_soc_dai_set_clkdiv(codec_dai, WM9713_PCMCLK_DIV,
-				     WM9713_PCMDIV(wm9713_div));
 	if (ret < 0)
 		return ret;
 
@@ -154,35 +164,99 @@ static struct snd_soc_dai_link zylonite_dai[] = {
 {
 	.name = "AC97",
 	.stream_name = "AC97 HiFi",
-	.cpu_dai = &pxa_ac97_dai[PXA2XX_DAI_AC97_HIFI],
-	.codec_dai = &wm9713_dai[WM9713_DAI_AC97_HIFI],
+	.codec_name = "wm9713-codec",
+	.platform_name = "pxa-pcm-audio",
+	.cpu_dai_name = "pxa2xx-ac97",
+	.codec_dai_name = "wm9713-hifi",
 	.init = zylonite_wm9713_init,
 },
 {
 	.name = "AC97 Aux",
 	.stream_name = "AC97 Aux",
-	.cpu_dai = &pxa_ac97_dai[PXA2XX_DAI_AC97_AUX],
-	.codec_dai = &wm9713_dai[WM9713_DAI_AC97_AUX],
+	.codec_name = "wm9713-codec",
+	.platform_name = "pxa-pcm-audio",
+	.cpu_dai_name = "pxa2xx-ac97-aux",
+	.codec_dai_name = "wm9713-aux",
 },
 {
 	.name = "WM9713 Voice",
 	.stream_name = "WM9713 Voice",
-	.cpu_dai = &pxa_ssp_dai[PXA_DAI_SSP3],
-	.codec_dai = &wm9713_dai[WM9713_DAI_PCM_VOICE],
+	.codec_name = "wm9713-codec",
+	.platform_name = "pxa-pcm-audio",
+	.cpu_dai_name = "pxa-ssp-dai.2",
+	.codec_dai_name = "wm9713-voice",
 	.ops = &zylonite_voice_ops,
 },
 };
 
+static int zylonite_probe(struct snd_soc_card *card)
+{
+	int ret;
+
+	if (clk_pout) {
+		pout = clk_get(NULL, "CLK_POUT");
+		if (IS_ERR(pout)) {
+			dev_err(card->dev, "Unable to obtain CLK_POUT: %ld\n",
+				PTR_ERR(pout));
+			return PTR_ERR(pout);
+		}
+
+		ret = clk_enable(pout);
+		if (ret != 0) {
+			dev_err(card->dev, "Unable to enable CLK_POUT: %d\n",
+				ret);
+			clk_put(pout);
+			return ret;
+		}
+
+		dev_dbg(card->dev, "MCLK enabled at %luHz\n",
+			clk_get_rate(pout));
+	}
+
+	return 0;
+}
+
+static int zylonite_remove(struct snd_soc_card *card)
+{
+	if (clk_pout) {
+		clk_disable(pout);
+		clk_put(pout);
+	}
+
+	return 0;
+}
+
+static int zylonite_suspend_post(struct snd_soc_card *card)
+{
+	if (clk_pout)
+		clk_disable(pout);
+
+	return 0;
+}
+
+static int zylonite_resume_pre(struct snd_soc_card *card)
+{
+	int ret = 0;
+
+	if (clk_pout) {
+		ret = clk_enable(pout);
+		if (ret != 0)
+			dev_err(card->dev, "Unable to enable CLK_POUT: %d\n",
+				ret);
+	}
+
+	return ret;
+}
+
 static struct snd_soc_card zylonite = {
 	.name = "Zylonite",
-	.platform = &pxa2xx_soc_platform,
+	.probe = &zylonite_probe,
+	.remove = &zylonite_remove,
+	.suspend_post = &zylonite_suspend_post,
+	.resume_pre = &zylonite_resume_pre,
 	.dai_link = zylonite_dai,
 	.num_links = ARRAY_SIZE(zylonite_dai),
-};
-
-static struct snd_soc_device zylonite_snd_ac97_devdata = {
-	.card = &zylonite,
-	.codec_dev = &soc_codec_dev_wm9713,
+	.owner = THIS_MODULE,
 };
 
 static struct platform_device *zylonite_snd_ac97_device;
@@ -195,9 +269,7 @@ static int __init zylonite_init(void)
 	if (!zylonite_snd_ac97_device)
 		return -ENOMEM;
 
-	platform_set_drvdata(zylonite_snd_ac97_device,
-			     &zylonite_snd_ac97_devdata);
-	zylonite_snd_ac97_devdata.dev = &zylonite_snd_ac97_device->dev;
+	platform_set_drvdata(zylonite_snd_ac97_device, &zylonite);
 
 	ret = platform_device_add(zylonite_snd_ac97_device);
 	if (ret != 0)

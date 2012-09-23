@@ -55,9 +55,21 @@
 		device_type = "soc";
 
 		ranges = <0x00000000 0xe0000000 0x00100000>;
-		reg = <0xe0000000 0x00001000>;	// CCSRBAR 1M
 		bus-frequency = <0>;		// Filled in by U-Boot
 		compatible = "fsl,mpc8544-immr", "simple-bus";
+
+		ecm-law@0 {
+			compatible = "fsl,ecm-law";
+			reg = <0x0 0x1000>;
+			fsl,num-laws = <10>;
+		};
+
+		ecm@1000 {
+			compatible = "fsl,mpc8544-ecm", "fsl,ecm";
+			reg = <0x1000 0x1000>;
+			interrupts = <17 2>;
+			interrupt-parent = <&mpic>;
+		};
 
 		memory-controller@2000 {
 			compatible = "fsl,mpc8544-memory-controller";
@@ -228,6 +240,8 @@
 		#address-cells = <2>;
 		#size-cells = <1>;
 		reg = <0xe0005000 0x40>;
+		interrupt-parent = <&mpic>;
+		interrupts = <19 2>;
 
 		ranges = <0 0 0xfc000000 0x04000000
 			  2 0 0xc8000000 0x04000000
@@ -314,7 +328,6 @@
 	};
 
 	pci0: pci@e0008000 {
-		cell-index = <0>;
 		#interrupt-cells = <1>;
 		#size-cells = <2>;
 		#address-cells = <3>;

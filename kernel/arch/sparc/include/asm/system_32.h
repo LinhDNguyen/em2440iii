@@ -15,11 +15,6 @@
 
 #include <linux/irqflags.h>
 
-static inline unsigned int probe_irq_mask(unsigned long val)
-{
-	return 0;
-}
-
 /*
  * Sparc (general) CPU types
  */
@@ -32,6 +27,7 @@ enum sparc_cpu {
   sun4u       = 0x05, /* V8 ploos ploos */
   sun_unknown = 0x06,
   ap1000      = 0x07, /* almost a sun4m */
+  sparc_leon  = 0x08, /* Leon SoC */
 };
 
 /* Really, userland should not be looking at any of this... */
@@ -224,7 +220,7 @@ static inline unsigned long __xchg(unsigned long x, __volatile__ void * ptr, int
 	switch (size) {
 	case 4:
 		return xchg_u32(ptr, x);
-	};
+	}
 	__xchg_called_with_bad_pointer();
 	return x;
 }

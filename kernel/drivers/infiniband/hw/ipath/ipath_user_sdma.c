@@ -33,6 +33,7 @@
 #include <linux/types.h>
 #include <linux/device.h>
 #include <linux/dmapool.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/highmem.h>
@@ -235,7 +236,7 @@ static int ipath_user_sdma_num_pages(const struct iovec *iov)
 	return 1 + ((epage - spage) >> PAGE_SHIFT);
 }
 
-/* truncate length to page boundry */
+/* truncate length to page boundary */
 static int ipath_user_sdma_page_length(unsigned long addr, unsigned long len)
 {
 	const unsigned long offset = addr & ~PAGE_MASK;

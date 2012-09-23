@@ -5,7 +5,7 @@
  * NetLabel system manages static and dynamic label mappings for network
  * protocols such as CIPSO and RIPSO.
  *
- * Author: Paul Moore <paul.moore@hp.com>
+ * Author: Paul Moore <paul@paul-moore.com>
  *
  */
 
@@ -33,12 +33,13 @@
 #include <linux/string.h>
 #include <linux/skbuff.h>
 #include <linux/audit.h>
+#include <linux/slab.h>
 #include <net/sock.h>
 #include <net/netlink.h>
 #include <net/genetlink.h>
 #include <net/netlabel.h>
 #include <net/cipso_ipv4.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #include "netlabel_user.h"
 #include "netlabel_cipso_v4.h"
@@ -421,7 +422,6 @@ static int netlbl_cipsov4_add(struct sk_buff *skb, struct genl_info *info)
 
 {
 	int ret_val = -EINVAL;
-	const char *type_str = "(unknown)";
 	struct netlbl_audit audit_info;
 
 	if (!info->attrs[NLBL_CIPSOV4_A_DOI] ||
@@ -431,15 +431,12 @@ static int netlbl_cipsov4_add(struct sk_buff *skb, struct genl_info *info)
 	netlbl_netlink_auditinfo(skb, &audit_info);
 	switch (nla_get_u32(info->attrs[NLBL_CIPSOV4_A_MTYPE])) {
 	case CIPSO_V4_MAP_TRANS:
-		type_str = "trans";
 		ret_val = netlbl_cipsov4_add_std(info, &audit_info);
 		break;
 	case CIPSO_V4_MAP_PASS:
-		type_str = "pass";
 		ret_val = netlbl_cipsov4_add_pass(info, &audit_info);
 		break;
 	case CIPSO_V4_MAP_LOCAL:
-		type_str = "local";
 		ret_val = netlbl_cipsov4_add_local(info, &audit_info);
 		break;
 	}
@@ -785,18 +782,6 @@ static struct genl_ops netlbl_cipsov4_ops[] = {
  */
 int __init netlbl_cipsov4_genl_init(void)
 {
-	int ret_val, i;
-
-	ret_val = genl_register_family(&netlbl_cipsov4_gnl_family);
-	if (ret_val != 0)
-		return ret_val;
-
-	for (i = 0; i < ARRAY_SIZE(netlbl_cipsov4_ops); i++) {
-		ret_val = genl_register_ops(&netlbl_cipsov4_gnl_family,
-				&netlbl_cipsov4_ops[i]);
-		if (ret_val != 0)
-			return ret_val;
-	}
-
-	return 0;
+	return genl_register_family_with_ops(&netlbl_cipsov4_gnl_family,
+		netlbl_cipsov4_ops, ARRAY_SIZE(netlbl_cipsov4_ops));
 }

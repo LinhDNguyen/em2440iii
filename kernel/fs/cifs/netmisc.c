@@ -61,6 +61,7 @@ static const struct smb_to_posix_error mapping_table_ERRDOS[] = {
 	{ERRremcd, -EACCES},
 	{ERRdiffdevice, -EXDEV},
 	{ERRnofiles, -ENOENT},
+	{ERRwriteprot, -EROFS},
 	{ERRbadshare, -ETXTBSY},
 	{ERRlock, -EACCES},
 	{ERRunsup, -EINVAL},
@@ -133,24 +134,100 @@ static const struct smb_to_posix_error mapping_table_ERRHRD[] = {
 	{0, 0}
 };
 
-/* Convert string containing dotted ip address to binary form */
-/* returns 0 if invalid address */
-
-int
-cifs_inet_pton(const int address_family, const char *cp, void *dst)
+/*
+ * Convert a string containing text IPv4 or IPv6 address to binary form.
+ *
+ * Returns 0 on failure.
+ */
+static int
+cifs_inet_pton(const int address_family, const char *cp, int len, void *dst)
 {
 	int ret = 0;
 
 	/* calculate length by finding first slash or NULL */
 	if (address_family == AF_INET)
-		ret = in4_pton(cp, -1 /* len */, dst, '\\', NULL);
+		ret = in4_pton(cp, len, dst, '\\', NULL);
 	else if (address_family == AF_INET6)
-		ret = in6_pton(cp, -1 /* len */, dst , '\\', NULL);
+		ret = in6_pton(cp, len, dst , '\\', NULL);
 
-	cFYI(DBG2, ("address conversion returned %d for %s", ret, cp));
+	cFYI(DBG2, "address conversion returned %d for %*.*s",
+	     ret, len, len, cp);
 	if (ret > 0)
 		ret = 1;
 	return ret;
+}
+
+/*
+ * Try to convert a string to an IPv4 address and then attempt to convert
+ * it to an IPv6 address if that fails. Set the family field if either
+ * succeeds. If it's an IPv6 address and it has a '%' sign in it, try to
+ * treat the part following it as a numeric sin6_scope_id.
+ *
+ * Returns 0 on failure.
+ */
+int
+cifs_convert_address(struct sockaddr *dst, const char *src, int len)
+{
+	int rc, alen, slen;
+	const char *pct;
+	char scope_id[13];
+	struct sockaddr_in *s4 = (struct sockaddr_in *) dst;
+	struct sockaddr_in6 *s6 = (struct sockaddr_in6 *) dst;
+
+	/* IPv4 address */
+	if (cifs_inet_pton(AF_INET, src, len, &s4->sin_addr.s_addr)) {
+		s4->sin_family = AF_INET;
+		return 1;
+	}
+
+	/* attempt to exclude the scope ID from the address part */
+	pct = memchr(src, '%', len);
+	alen = pct ? pct - src : len;
+
+	rc = cifs_inet_pton(AF_INET6, src, alen, &s6->sin6_addr.s6_addr);
+	if (!rc)
+		return rc;
+
+	s6->sin6_family = AF_INET6;
+	if (pct) {
+		/* grab the scope ID */
+		slen = len - (alen + 1);
+		if (slen <= 0 || slen > 12)
+			return 0;
+		memcpy(scope_id, pct + 1, slen);
+		scope_id[slen] = '\0';
+
+		rc = strict_strtoul(scope_id, 0,
+					(unsigned long *)&s6->sin6_scope_id);
+		rc = (rc == 0) ? 1 : 0;
+	}
+
+	return rc;
+}
+
+int
+cifs_set_port(struct sockaddr *addr, const unsigned short int port)
+{
+	switch (addr->sa_family) {
+	case AF_INET:
+		((struct sockaddr_in *)addr)->sin_port = htons(port);
+		break;
+	case AF_INET6:
+		((struct sockaddr_in6 *)addr)->sin6_port = htons(port);
+		break;
+	default:
+		return 0;
+	}
+	return 1;
+}
+
+int
+cifs_fill_sockaddr(struct sockaddr *dst, const char *src, int len,
+		   const unsigned short int port)
+{
+	if (!cifs_convert_address(dst, src, len))
+		return 0;
+	return cifs_set_port(dst, port);
 }
 
 /*****************************************************************************
@@ -759,7 +836,7 @@ ntstatus_to_dos(__u32 ntstatus, __u8 *eclass, __u16 *ecode)
 }
 
 int
-map_smb_to_linux_error(struct smb_hdr *smb, int logErr)
+map_smb_to_linux_error(struct smb_hdr *smb, bool logErr)
 {
 	unsigned int i;
 	int rc = -EIO;	/* if transport error smb error may not be set */
@@ -822,8 +899,8 @@ map_smb_to_linux_error(struct smb_hdr *smb, int logErr)
 	}
 	/* else ERRHRD class errors or junk  - return EIO */
 
-	cFYI(1, ("Mapping smb error code %d to POSIX err %d",
-		 smberrcode, rc));
+	cFYI(1, "Mapping smb error code 0x%x to POSIX err %d",
+		 le32_to_cpu(smb->Status.CifsError), rc);
 
 	/* generic corrective action e.g. reconnect SMB session on
 	 * ERRbaduid could be added */
@@ -839,26 +916,19 @@ unsigned int
 smbCalcSize(struct smb_hdr *ptr)
 {
 	return (sizeof(struct smb_hdr) + (2 * ptr->WordCount) +
-		2 /* size of the bcc field */ + BCC(ptr));
-}
-
-unsigned int
-smbCalcSize_LE(struct smb_hdr *ptr)
-{
-	return (sizeof(struct smb_hdr) + (2 * ptr->WordCount) +
-		2 /* size of the bcc field */ + le16_to_cpu(BCC_LE(ptr)));
+		2 /* size of the bcc field */ + get_bcc(ptr));
 }
 
 /* The following are taken from fs/ntfs/util.c */
 
 #define NTFS_TIME_OFFSET ((u64)(369*365 + 89) * 24 * 3600 * 10000000)
 
-    /*
-     * Convert the NT UTC (based 1601-01-01, in hundred nanosecond units)
-     * into Unix UTC (based 1970-01-01, in seconds).
-     */
+/*
+ * Convert the NT UTC (based 1601-01-01, in hundred nanosecond units)
+ * into Unix UTC (based 1970-01-01, in seconds).
+ */
 struct timespec
-cifs_NTtimeToUnix(u64 ntutc)
+cifs_NTtimeToUnix(__le64 ntutc)
 {
 	struct timespec ts;
 	/* BB what about the timezone? BB */
@@ -866,7 +936,7 @@ cifs_NTtimeToUnix(u64 ntutc)
 	/* Subtract the NTFS time offset, then convert to 1s intervals. */
 	u64 t;
 
-	t = ntutc - NTFS_TIME_OFFSET;
+	t = le64_to_cpu(ntutc) - NTFS_TIME_OFFSET;
 	ts.tv_nsec = do_div(t, 10000000) * 100;
 	ts.tv_sec = t;
 	return ts;
@@ -883,33 +953,29 @@ cifs_UnixTimeToNT(struct timespec t)
 static int total_days_of_prev_months[] =
 {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
 
-
-__le64 cnvrtDosCifsTm(__u16 date, __u16 time)
-{
-	return cpu_to_le64(cifs_UnixTimeToNT(cnvrtDosUnixTm(date, time)));
-}
-
-struct timespec cnvrtDosUnixTm(__u16 date, __u16 time)
+struct timespec cnvrtDosUnixTm(__le16 le_date, __le16 le_time, int offset)
 {
 	struct timespec ts;
 	int sec, min, days, month, year;
+	u16 date = le16_to_cpu(le_date);
+	u16 time = le16_to_cpu(le_time);
 	SMB_TIME *st = (SMB_TIME *)&time;
 	SMB_DATE *sd = (SMB_DATE *)&date;
 
-	cFYI(1, ("date %d time %d", date, time));
+	cFYI(1, "date %d time %d", date, time);
 
 	sec = 2 * st->TwoSeconds;
 	min = st->Minutes;
 	if ((sec > 59) || (min > 59))
-		cERROR(1, ("illegal time min %d sec %d", min, sec));
+		cERROR(1, "illegal time min %d sec %d", min, sec);
 	sec += (min * 60);
 	sec += 60 * 60 * st->Hours;
 	if (st->Hours > 24)
-		cERROR(1, ("illegal hours %d", st->Hours));
+		cERROR(1, "illegal hours %d", st->Hours);
 	days = sd->Day;
 	month = sd->Month;
 	if ((days > 31) || (month > 12)) {
-		cERROR(1, ("illegal date, month %d day: %d", month, days));
+		cERROR(1, "illegal date, month %d day: %d", month, days);
 		if (month > 12)
 			month = 12;
 	}
@@ -933,9 +999,9 @@ struct timespec cnvrtDosUnixTm(__u16 date, __u16 time)
 		days -= ((year & 0x03) == 0) && (month < 2 ? 1 : 0);
 	sec += 24 * 60 * 60 * days;
 
-	ts.tv_sec = sec;
+	ts.tv_sec = sec + offset;
 
-	/* cFYI(1,("sec after cnvrt dos to unix time %d",sec)); */
+	/* cFYI(1, "sec after cnvrt dos to unix time %d",sec); */
 
 	ts.tv_nsec = 0;
 	return ts;

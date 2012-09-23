@@ -20,6 +20,7 @@
 #include <linux/init.h>
 #include <linux/bootmem.h> /* max_low_pfn */
 #include <linux/vmalloc.h>
+#include <linux/gfp.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -30,8 +31,6 @@
 #include <asm/mmu_context.h>
 #include <asm/console.h>
 #include <asm/tlb.h>
-
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 extern void die_if_kernel(char *,struct pt_regs *,long);
 
@@ -299,7 +298,7 @@ printk_memory_info(void)
 	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
 
 	printk("Memory: %luk/%luk available (%luk kernel code, %luk reserved, %luk data, %luk init)\n",
-	       (unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
+	       nr_free_pages() << (PAGE_SHIFT-10),
 	       max_mapnr << (PAGE_SHIFT-10),
 	       codesize >> 10,
 	       reservedpages << (PAGE_SHIFT-10),

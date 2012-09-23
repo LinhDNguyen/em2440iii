@@ -226,7 +226,7 @@ printk(KERN_WARNING "%s:%s: " format "\n" , __FILE__,  __func__ , ## arg)
 #define INFO(format, arg...) \
 printk(KERN_INFO "%s:%s: " format "\n" , __FILE__,  __func__ , ## arg)
 
-#include "isdnhdlc.h"
+#include <linux/isdn/hdlc.h>
 #include "fsm.h"
 #include "hisax_if.h"
 #include <linux/skbuff.h>
@@ -377,7 +377,6 @@ struct st5481_bcs {
 };
 
 struct st5481_adapter {
-	struct list_head list;
 	int number_of_leds;
 	struct usb_device *usb_dev;
 	struct hisax_d_if hisax_d_if;

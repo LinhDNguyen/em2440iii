@@ -106,7 +106,6 @@ struct thread_struct {
 
 #define start_thread(regs, new_pc, new_spu) 				\
 	do {								\
-		set_fs(USER_DS); 					\
 		regs->psw = (regs->psw | USERPS_BPSW) & 0x0000FFFFUL;	\
 		regs->bpc = new_pc;					\
 		regs->spu = new_spu;					\
@@ -139,8 +138,6 @@ extern unsigned long thread_saved_pc(struct task_struct *);
 unsigned long get_wchan(struct task_struct *p);
 #define KSTK_EIP(tsk)  ((tsk)->thread.lr)
 #define KSTK_ESP(tsk)  ((tsk)->thread.sp)
-
-#define THREAD_SIZE (2*PAGE_SIZE)
 
 #define cpu_relax()	barrier()
 

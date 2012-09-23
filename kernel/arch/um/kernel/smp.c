@@ -7,9 +7,6 @@
 #include "asm/pgalloc.h"
 #include "asm/tlb.h"
 
-/* For some reason, mmu_gathers are referenced when CONFIG_SMP is off. */
-DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
-
 #ifdef CONFIG_SMP
 
 #include "linux/sched.h"
@@ -111,7 +108,7 @@ void smp_prepare_cpus(unsigned int maxcpus)
 	int i;
 
 	for (i = 0; i < ncpus; ++i)
-		cpu_set(i, cpu_possible_map);
+		set_cpu_possible(i, true);
 
 	cpu_clear(me, cpu_online_map);
 	cpu_set(me, cpu_online_map);
@@ -173,7 +170,7 @@ void IPI_handler(int cpu)
 			break;
 
 		case 'R':
-			set_tsk_need_resched(current);
+			scheduler_ipi();
 			break;
 
 		case 'S':

@@ -9,6 +9,7 @@
 
 #include <linux/device.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 
 #include "base.h"
 
@@ -396,6 +397,7 @@ static int remove_nodes(struct device *dev,
 
 static int release_nodes(struct device *dev, struct list_head *first,
 			 struct list_head *end, unsigned long flags)
+	__releases(&dev->devres_lock)
 {
 	LIST_HEAD(todo);
 	int cnt;
@@ -428,6 +430,9 @@ int devres_release_all(struct device *dev)
 {
 	unsigned long flags;
 
+	/* Looks like an uninitialized device structure */
+	if (WARN_ON(dev->devres_head.next == NULL))
+		return -ENODEV;
 	spin_lock_irqsave(&dev->devres_lock, flags);
 	return release_nodes(dev, dev->devres_head.next, &dev->devres_head,
 			     flags);

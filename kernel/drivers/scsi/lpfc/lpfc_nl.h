@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2008 Emulex.  All rights reserved.                *
+ * Copyright (C) 2010 Emulex.  All rights reserved.                *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.emulex.com                                                  *
  *                                                                 *
@@ -50,7 +50,7 @@
  * and subcategory. The event type must come first.
  * The subcategory further defines the data that follows in the rest
  * of the payload. Each category will have its own unique header plus
- * any addtional data unique to the subcategory.
+ * any additional data unique to the subcategory.
  * The payload sent via the fc transport is one-way driver->application.
  */
 

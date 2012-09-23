@@ -11,8 +11,8 @@
  * (at your option) any later version.
  */
 
-#ifndef __ASM_POWERPC_GPIO_H
-#define __ASM_POWERPC_GPIO_H
+#ifndef _ASM_MICROBLAZE_GPIO_H
+#define _ASM_MICROBLAZE_GPIO_H
 
 #include <linux/errno.h>
 #include <asm-generic/gpio.h>
@@ -38,12 +38,9 @@ static inline int gpio_cansleep(unsigned int gpio)
 	return __gpio_cansleep(gpio);
 }
 
-/*
- * Not implemented, yet.
- */
 static inline int gpio_to_irq(unsigned int gpio)
 {
-	return -ENOSYS;
+	return __gpio_to_irq(gpio);
 }
 
 static inline int irq_to_gpio(unsigned int irq)
@@ -53,4 +50,4 @@ static inline int irq_to_gpio(unsigned int irq)
 
 #endif /* CONFIG_GPIOLIB */
 
-#endif /* __ASM_POWERPC_GPIO_H */
+#endif /* _ASM_MICROBLAZE_GPIO_H */

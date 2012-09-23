@@ -50,7 +50,7 @@ static int init_hw(struct echoaudio *chip, u16 device_id, u16 subdevice_id)
 	chip->device_id = device_id;
 	chip->subdevice_id = subdevice_id;
 	chip->bad_board = TRUE;
-	chip->dsp_code_to_load = &card_fw[FW_INDIGO_DJ_DSP];
+	chip->dsp_code_to_load = FW_INDIGO_DJ_DSP;
 	/* Since this card has no ASIC, mark it as loaded so everything
 	   works OK */
 	chip->asic_loaded = TRUE;
@@ -60,23 +60,15 @@ static int init_hw(struct echoaudio *chip, u16 device_id, u16 subdevice_id)
 		return err;
 	chip->bad_board = FALSE;
 
-	if ((err = init_line_levels(chip)) < 0)
-		return err;
-
-	/* Default routing of the virtual channels: vchannels 0-3 and
-	vchannels 4-7 are routed to real channels 0-4 */
-	set_vmixer_gain(chip, 0, 0, 0);
-	set_vmixer_gain(chip, 1, 1, 0);
-	set_vmixer_gain(chip, 2, 2, 0);
-	set_vmixer_gain(chip, 3, 3, 0);
-	set_vmixer_gain(chip, 0, 4, 0);
-	set_vmixer_gain(chip, 1, 5, 0);
-	set_vmixer_gain(chip, 2, 6, 0);
-	set_vmixer_gain(chip, 3, 7, 0);
-	err = update_vmixer_level(chip);
-
 	DE_INIT(("init_hw done\n"));
 	return err;
+}
+
+
+
+static int set_mixer_defaults(struct echoaudio *chip)
+{
+	return init_line_levels(chip);
 }
 
 

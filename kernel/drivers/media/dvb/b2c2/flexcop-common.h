@@ -1,13 +1,12 @@
 /*
- * This file is part of linux driver the digital TV devices equipped with B2C2 FlexcopII(b)/III
- *
- * flexcop-common.h - common header file for device-specific source files also.
- *
- * see flexcop.c for copyright information.
+ * Linux driver for digital TV devices equipped with B2C2 FlexcopII(b)/III
+ * flexcop-common.h - common header file for device-specific source files
+ * see flexcop.c for copyright information
  */
 #ifndef __FLEXCOP_COMMON_H__
 #define __FLEXCOP_COMMON_H__
 
+#include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/mutex.h>
 

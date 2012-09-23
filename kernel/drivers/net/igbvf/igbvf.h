@@ -1,7 +1,7 @@
 /*******************************************************************************
 
   Intel(R) 82576 Virtual Function Linux driver
-  Copyright(c) 2009 Intel Corporation.
+  Copyright(c) 2009 - 2010 Intel Corporation.
 
   This program is free software; you can redistribute it and/or modify it
   under the terms and conditions of the GNU General Public License,
@@ -34,7 +34,7 @@
 #include <linux/timer.h>
 #include <linux/io.h>
 #include <linux/netdevice.h>
-
+#include <linux/if_vlan.h>
 
 #include "vf.h"
 
@@ -45,7 +45,7 @@ struct igbvf_adapter;
 /* Interrupt defines */
 #define IGBVF_START_ITR                 648 /* ~6000 ints/sec */
 
-/* Interrupt modes, as used by the IntMode paramter */
+/* Interrupt modes, as used by the IntMode parameter */
 #define IGBVF_INT_MODE_LEGACY           0
 #define IGBVF_INT_MODE_MSI              1
 #define IGBVF_INT_MODE_MSIX             2
@@ -97,6 +97,7 @@ struct igbvf_adapter;
 
 enum igbvf_boards {
 	board_vf,
+	board_i350_vf,
 };
 
 struct igbvf_queue_stats {
@@ -117,6 +118,7 @@ struct igbvf_buffer {
 			unsigned long time_stamp;
 			u16 length;
 			u16 next_to_watch;
+			u16 mapped_as_page;
 		};
 		/* Rx */
 		struct {
@@ -125,7 +127,6 @@ struct igbvf_buffer {
 			unsigned int page_offset;
 		};
 	};
-	struct page *page;
 };
 
 union igbvf_desc {
@@ -172,7 +173,7 @@ struct igbvf_adapter {
 
 	const struct igbvf_info *ei;
 
-	struct vlan_group *vlgrp;
+	unsigned long active_vlans[BITS_TO_LONGS(VLAN_N_VID)];
 	u32 bd_number;
 	u32 rx_buffer_len;
 	u32 polling_interval;
@@ -197,12 +198,8 @@ struct igbvf_adapter {
 	struct igbvf_ring *tx_ring /* One per active queue */
 	____cacheline_aligned_in_smp;
 
-	unsigned long tx_queue_len;
 	unsigned int restart_queue;
 	u32 txd_cmd;
-
-	bool detect_tx_hung;
-	u8 tx_timeout_factor;
 
 	u32 tx_int_delay;
 	u32 tx_abs_int_delay;
@@ -275,6 +272,7 @@ struct igbvf_adapter {
 	unsigned long led_status;
 
 	unsigned int flags;
+	unsigned long last_reset;
 };
 
 struct igbvf_info {
@@ -286,11 +284,7 @@ struct igbvf_info {
 };
 
 /* hardware capability, feature, and workaround flags */
-#define FLAG_HAS_HW_VLAN_FILTER           (1 << 0)
-#define FLAG_HAS_JUMBO_FRAMES             (1 << 1)
-#define FLAG_MSI_ENABLED                  (1 << 2)
-#define FLAG_RX_CSUM_ENABLED              (1 << 3)
-#define FLAG_TSO_FORCE                    (1 << 4)
+#define IGBVF_FLAG_RX_CSUM_DISABLED             (1 << 0)
 
 #define IGBVF_RX_DESC_ADV(R, i)     \
 	(&((((R).desc))[i].rx_desc))

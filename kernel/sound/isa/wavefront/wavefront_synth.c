@@ -28,6 +28,7 @@
 #include <linux/wait.h>
 #include <linux/firmware.h>
 #include <linux/moduleparam.h>
+#include <linux/slab.h>
 #include <sound/core.h>
 #include <sound/snd_wavefront.h>
 #include <sound/initval.h>
@@ -633,7 +634,7 @@ wavefront_get_sample_status (snd_wavefront_t *dev, int assume_rom)
 		wbuf[1] = i >> 7;
 
 		if (snd_wavefront_cmd (dev, WFC_IDENTIFY_SAMPLE_TYPE, rbuf, wbuf)) {
-			snd_printk("cannot identify sample "
+			snd_printk(KERN_WARNING "cannot identify sample "
 				   "type of slot %d\n", i);
 			dev->sample_status[i] = WF_ST_EMPTY;
 			continue;
@@ -1664,12 +1665,11 @@ snd_wavefront_synth_ioctl (struct snd_hwdep *hw, struct file *file,
 		break;
 
 	case WFCTL_WFCMD:
-		wc = kmalloc(sizeof(*wc), GFP_KERNEL);
-		if (! wc)
-			return -ENOMEM;
-		if (copy_from_user (wc, argp, sizeof (*wc)))
-			err = -EFAULT;
-		else if (wavefront_synth_control (acard, wc) < 0)
+		wc = memdup_user(argp, sizeof(*wc));
+		if (IS_ERR(wc))
+			return PTR_ERR(wc);
+
+		if (wavefront_synth_control (acard, wc) < 0)
 			err = -EIO;
 		else if (copy_to_user (argp, wc, sizeof (*wc)))
 			err = -EFAULT;

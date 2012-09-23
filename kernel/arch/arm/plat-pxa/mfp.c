@@ -17,7 +17,6 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/io.h>
-#include <linux/sysdev.h>
 
 #include <plat/mfp.h>
 
@@ -77,11 +76,13 @@
  * MFPR_PULL_LOW        1         0        1
  * MFPR_PULL_HIGH       1         1        0
  * MFPR_PULL_BOTH       1         1        1
+ * MFPR_PULL_FLOAT	1         0        0
  */
 #define MFPR_PULL_NONE		(0)
 #define MFPR_PULL_LOW		(MFPR_PULL_SEL | MFPR_PULLDOWN_EN)
 #define MFPR_PULL_BOTH		(MFPR_PULL_LOW | MFPR_PULLUP_EN)
 #define MFPR_PULL_HIGH		(MFPR_PULL_SEL | MFPR_PULLUP_EN)
+#define MFPR_PULL_FLOAT		(MFPR_PULL_SEL)
 
 /* mfp_spin_lock is used to ensure that MFP register configuration
  * (most likely a read-modify-write operation) is atomic, and that
@@ -108,6 +109,7 @@ static const unsigned long mfpr_lpm[] = {
 	MFPR_LPM_PULL_LOW,
 	MFPR_LPM_PULL_HIGH,
 	MFPR_LPM_FLOAT,
+	MFPR_LPM_INPUT,
 };
 
 /* mapping of MFP_PULL_* definitions to MFPR_PULL_* register bits */
@@ -116,6 +118,7 @@ static const unsigned long mfpr_pull[] = {
 	MFPR_PULL_LOW,
 	MFPR_PULL_HIGH,
 	MFPR_PULL_BOTH,
+	MFPR_PULL_FLOAT,
 };
 
 /* mapping of MFP_LPM_EDGE_* definitions to MFPR_EDGE_* register bits */
@@ -135,10 +138,11 @@ static const unsigned long mfpr_edge[] = {
 #define mfp_configured(p)	((p)->config != -1)
 
 /*
- * perform a read-back of any MFPR register to make sure the
+ * perform a read-back of any valid MFPR register to make sure the
  * previous writings are finished
  */
-#define mfpr_sync()	(void)__raw_readl(mfpr_mmio_base + 0)
+static unsigned long mfpr_off_readback;
+#define mfpr_sync()	(void)__raw_readl(mfpr_mmio_base + mfpr_off_readback)
 
 static inline void __mfp_config_run(struct mfp_pin *p)
 {
@@ -204,7 +208,7 @@ unsigned long mfp_read(int mfp)
 {
 	unsigned long val, flags;
 
-	BUG_ON(mfp >= MFP_PIN_MAX);
+	BUG_ON(mfp < 0 || mfp >= MFP_PIN_MAX);
 
 	spin_lock_irqsave(&mfp_spin_lock, flags);
 	val = mfpr_readl(mfp_table[mfp].mfpr_off);
@@ -217,7 +221,7 @@ void mfp_write(int mfp, unsigned long val)
 {
 	unsigned long flags;
 
-	BUG_ON(mfp >= MFP_PIN_MAX);
+	BUG_ON(mfp < 0 || mfp >= MFP_PIN_MAX);
 
 	spin_lock_irqsave(&mfp_spin_lock, flags);
 	mfpr_writel(mfp_table[mfp].mfpr_off, val);
@@ -243,6 +247,9 @@ void __init mfp_init_addr(struct mfp_addr_map *map)
 	int i;
 
 	spin_lock_irqsave(&mfp_spin_lock, flags);
+
+	/* mfp offset for readback */
+	mfpr_off_readback = map[0].offset;
 
 	for (p = map; p->start != MFP_PIN_INVALID; p++) {
 		offset = p->offset;

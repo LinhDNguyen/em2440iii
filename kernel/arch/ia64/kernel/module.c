@@ -171,7 +171,8 @@ apply_imm60 (struct module *mod, struct insn *insn, uint64_t val)
 		return 0;
 	}
 	if (val + ((uint64_t) 1 << 59) >= (1UL << 60)) {
-		printk(KERN_ERR "%s: value %ld out of IMM60 range\n", mod->name, (int64_t) val);
+		printk(KERN_ERR "%s: value %ld out of IMM60 range\n",
+			mod->name, (long) val);
 		return 0;
 	}
 	ia64_patch_imm60((u64) insn, val);
@@ -182,7 +183,8 @@ static int
 apply_imm22 (struct module *mod, struct insn *insn, uint64_t val)
 {
 	if (val + (1 << 21) >= (1 << 22)) {
-		printk(KERN_ERR "%s: value %li out of IMM22 range\n", mod->name, (int64_t)val);
+		printk(KERN_ERR "%s: value %li out of IMM22 range\n",
+			mod->name, (long)val);
 		return 0;
 	}
 	ia64_patch((u64) insn, 0x01fffcfe000UL, (  ((val & 0x200000UL) << 15) /* bit 21 -> 36 */
@@ -196,7 +198,8 @@ static int
 apply_imm21b (struct module *mod, struct insn *insn, uint64_t val)
 {
 	if (val + (1 << 20) >= (1 << 21)) {
-		printk(KERN_ERR "%s: value %li out of IMM21b range\n", mod->name, (int64_t)val);
+		printk(KERN_ERR "%s: value %li out of IMM21b range\n",
+			mod->name, (long)val);
 		return 0;
 	}
 	ia64_patch((u64) insn, 0x11ffffe000UL, (  ((val & 0x100000UL) << 16) /* bit 20 -> 36 */
@@ -300,14 +303,6 @@ plt_target (struct plt_entry *plt)
 }
 
 #endif /* !USE_BRL */
-
-void *
-module_alloc (unsigned long size)
-{
-	if (!size)
-		return NULL;
-	return vmalloc(size);
-}
 
 void
 module_free (struct module *mod, void *module_region)
@@ -701,8 +696,9 @@ do_reloc (struct module *mod, uint8_t r_type, Elf64_Sym *sym, uint64_t addend,
 	      case RV_PCREL2:
 		if (r_type == R_IA64_PCREL21BI) {
 			if (!is_internal(mod, val)) {
-				printk(KERN_ERR "%s: %s reloc against non-local symbol (%lx)\n",
-				       __func__, reloc_name[r_type], val);
+				printk(KERN_ERR "%s: %s reloc against "
+					"non-local symbol (%lx)\n", __func__,
+					reloc_name[r_type], (unsigned long)val);
 				return -ENOEXEC;
 			}
 			format = RF_INSN21B;
@@ -847,14 +843,6 @@ apply_relocate_add (Elf64_Shdr *sechdrs, const char *strtab, unsigned int symind
 			return ret;
 	}
 	return 0;
-}
-
-int
-apply_relocate (Elf64_Shdr *sechdrs, const char *strtab, unsigned int symindex,
-		unsigned int relsec, struct module *mod)
-{
-	printk(KERN_ERR "module %s: REL relocs in section %u unsupported\n", mod->name, relsec);
-	return -ENOEXEC;
 }
 
 /*

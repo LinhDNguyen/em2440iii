@@ -39,15 +39,13 @@ struct cpuinfo_alpha {
 
 extern struct cpuinfo_alpha cpu_data[NR_CPUS];
 
-#define PROC_CHANGE_PENALTY     20
-
 #define hard_smp_processor_id()	__hard_smp_processor_id()
 #define raw_smp_processor_id()	(current_thread_info()->cpu)
 
 extern int smp_num_cpus;
 
 extern void arch_send_call_function_single_ipi(int cpu);
-extern void arch_send_call_function_ipi(cpumask_t mask);
+extern void arch_send_call_function_ipi_mask(const struct cpumask *mask);
 
 #else /* CONFIG_SMP */
 

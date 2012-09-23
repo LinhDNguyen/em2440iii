@@ -26,6 +26,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 
 #include <asm/sh7760fb.h>
 
@@ -118,18 +119,6 @@ static int sh7760_setcolreg (u_int regno,
 		(transp << info->var.transp.offset);
 
 	return 0;
-}
-
-static void encode_fix(struct fb_fix_screeninfo *fix, struct fb_info *info,
-		       unsigned long stride)
-{
-	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
-	strcpy(fix->id, "sh7760-lcdc");
-
-	fix->smem_start = (unsigned long)info->screen_base;
-	fix->smem_len = info->screen_size;
-
-	fix->line_length = stride;
 }
 
 static int sh7760fb_get_color_info(struct device *dev,
@@ -334,7 +323,8 @@ static int sh7760fb_set_par(struct fb_info *info)
 
 	iowrite32(ldsarl, par->base + LDSARL);	/* mem for lower half of DSTN */
 
-	encode_fix(&info->fix, info, stride);
+	info->fix.line_length = stride;
+
 	sh7760fb_check_var(&info->var, info);
 
 	sh7760fb_blank(FB_BLANK_UNBLANK, info);	/* panel on! */
@@ -435,6 +425,8 @@ static int sh7760fb_alloc_mem(struct fb_info *info)
 
 	info->screen_base = fbmem;
 	info->screen_size = vram;
+	info->fix.smem_start = (unsigned long)info->screen_base;
+	info->fix.smem_len = info->screen_size;
 
 	return 0;
 }
@@ -467,14 +459,14 @@ static int __devinit sh7760fb_probe(struct platform_device *pdev)
 	}
 
 	par->ioarea = request_mem_region(res->start,
-					 (res->end - res->start), pdev->name);
+					 resource_size(res), pdev->name);
 	if (!par->ioarea) {
 		dev_err(&pdev->dev, "mmio area busy\n");
 		ret = -EBUSY;
 		goto out_fb;
 	}
 
-	par->base = ioremap_nocache(res->start, res->end - res->start + 1);
+	par->base = ioremap_nocache(res->start, resource_size(res));
 	if (!par->base) {
 		dev_err(&pdev->dev, "cannot remap\n");
 		ret = -ENODEV;
@@ -520,6 +512,8 @@ static int __devinit sh7760fb_probe(struct platform_device *pdev)
 	info->var.transp.length = 0;
 	info->var.transp.msb_right = 0;
 
+	strcpy(info->fix.id, "sh7760-lcdc");
+
 	/* set the DON2 bit now, before cmap allocation, as it will randomize
 	 * palette memory.
 	 */
@@ -557,8 +551,7 @@ out_unmap:
 		free_irq(par->irq, &par->vsync);
 	iounmap(par->base);
 out_res:
-	release_resource(par->ioarea);
-	kfree(par->ioarea);
+	release_mem_region(res->start, resource_size(res));
 out_fb:
 	framebuffer_release(info);
 	return ret;
@@ -576,8 +569,7 @@ static int __devexit sh7760fb_remove(struct platform_device *dev)
 	if (par->irq >= 0)
 		free_irq(par->irq, par);
 	iounmap(par->base);
-	release_resource(par->ioarea);
-	kfree(par->ioarea);
+	release_mem_region(par->ioarea->start, resource_size(par->ioarea));
 	framebuffer_release(info);
 	platform_set_drvdata(dev, NULL);
 

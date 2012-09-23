@@ -238,7 +238,7 @@ static long fop_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
 	int __user *p = argp;
-	static struct watchdog_info ident = {
+	static const struct watchdog_info ident = {
 		.options = WDIOF_KEEPALIVEPING | WDIOF_SETTIMEOUT
 							| WDIOF_MAGICCLOSE,
 		.firmware_version = 1,
@@ -322,7 +322,8 @@ static int wdt_notify_sys(struct notifier_block *this,
 		 * watchdog on reboot with no heartbeat
 		 */
 		wdt_change(WDT_ENABLE);
-		printk(KERN_INFO PFX "Watchdog timer is now enabled with no heartbeat - should reboot in ~1 second.\n");
+		printk(KERN_INFO PFX "Watchdog timer is now enabled "
+			"with no heartbeat - should reboot in ~1 second.\n");
 	}
 	return NOTIFY_DONE;
 }
@@ -374,12 +375,17 @@ static int __init alim7101_wdt_init(void)
 	pci_dev_put(ali1543_south);
 	if ((tmp & 0x1e) == 0x00) {
 		if (!use_gpio) {
-			printk(KERN_INFO PFX "Detected old alim7101 revision 'a1d'.  If this is a cobalt board, set the 'use_gpio' module parameter.\n");
+			printk(KERN_INFO PFX
+				"Detected old alim7101 revision 'a1d'.  "
+				"If this is a cobalt board, set the 'use_gpio' "
+				"module parameter.\n");
 			goto err_out;
 		}
 		nowayout = 1;
 	} else if ((tmp & 0x1e) != 0x12 && (tmp & 0x1e) != 0x00) {
-		printk(KERN_INFO PFX "ALi 1543 South-Bridge does not have the correct revision number (???1001?) - WDT not set\n");
+		printk(KERN_INFO PFX
+			"ALi 1543 South-Bridge does not have the correct "
+			"revision number (???1001?) - WDT not set\n");
 		goto err_out;
 	}
 
@@ -409,7 +415,8 @@ static int __init alim7101_wdt_init(void)
 	if (nowayout)
 		__module_get(THIS_MODULE);
 
-	printk(KERN_INFO PFX "WDT driver for ALi M7101 initialised. timeout=%d sec (nowayout=%d)\n",
+	printk(KERN_INFO PFX "WDT driver for ALi M7101 initialised. "
+					"timeout=%d sec (nowayout=%d)\n",
 		timeout, nowayout);
 	return 0;
 
@@ -423,7 +430,7 @@ err_out:
 module_init(alim7101_wdt_init);
 module_exit(alim7101_wdt_unload);
 
-static struct pci_device_id alim7101_pci_tbl[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(alim7101_pci_tbl) __used = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M1533) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M7101) },
 	{ }

@@ -19,12 +19,14 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/kthread.h>
+#include <linux/slab.h>
 
 #include <linux/sunrpc/types.h>
 #include <linux/sunrpc/xdr.h>
 #include <linux/sunrpc/stats.h>
 #include <linux/sunrpc/svcsock.h>
 #include <linux/sunrpc/clnt.h>
+#include <linux/sunrpc/bc_xprt.h>
 
 #define RPCDBG_FACILITY	RPCDBG_SVCDSP
 
@@ -124,7 +126,7 @@ svc_pool_map_choose_mode(void)
 {
 	unsigned int node;
 
-	if (num_online_nodes() > 1) {
+	if (nr_online_nodes > 1) {
 		/*
 		 * Actually have multiple NUMA nodes,
 		 * so split pools on NUMA node boundaries
@@ -132,7 +134,7 @@ svc_pool_map_choose_mode(void)
 		return SVC_POOL_PERNODE;
 	}
 
-	node = any_online_node(node_online_map);
+	node = first_online_node;
 	if (nr_cpus_node(node) > 2) {
 		/*
 		 * Non-trivial SMP, or CONFIG_NUMA on
@@ -500,6 +502,10 @@ static int
 svc_init_buffer(struct svc_rqst *rqstp, unsigned int size)
 {
 	unsigned int pages, arghi;
+
+	/* bc_xprt uses fore channel allocated buffers */
+	if (svc_is_backchannel(rqstp))
+		return 1;
 
 	pages = size / PAGE_SIZE + 1; /* extra page as we hold both request and reply.
 				       * We assume one is at most one page
@@ -936,6 +942,8 @@ static void svc_unregister(const struct svc_serv *serv)
 			if (progp->pg_vers[i]->vs_hidden)
 				continue;
 
+			dprintk("svc: attempting to unregister %sv%u\n",
+				progp->pg_name, i);
 			__svc_unregister(progp->pg_prog, i, progp->pg_name);
 		}
 	}
@@ -970,20 +978,18 @@ svc_printk(struct svc_rqst *rqstp, const char *fmt, ...)
 }
 
 /*
- * Process the RPC request.
+ * Common routine for processing the RPC request.
  */
-int
-svc_process(struct svc_rqst *rqstp)
+static int
+svc_process_common(struct svc_rqst *rqstp, struct kvec *argv, struct kvec *resv)
 {
 	struct svc_program	*progp;
 	struct svc_version	*versp = NULL;	/* compiler food */
 	struct svc_procedure	*procp = NULL;
-	struct kvec *		argv = &rqstp->rq_arg.head[0];
-	struct kvec *		resv = &rqstp->rq_res.head[0];
 	struct svc_serv		*serv = rqstp->rq_server;
 	kxdrproc_t		xdr;
 	__be32			*statp;
-	u32			dir, prog, vers, proc;
+	u32			prog, vers, proc;
 	__be32			auth_stat, rpc_stat;
 	int			auth_res;
 	__be32			*reply_statp;
@@ -993,38 +999,22 @@ svc_process(struct svc_rqst *rqstp)
 	if (argv->iov_len < 6*4)
 		goto err_short_len;
 
-	/* setup response xdr_buf.
-	 * Initially it has just one page
-	 */
-	rqstp->rq_resused = 1;
-	resv->iov_base = page_address(rqstp->rq_respages[0]);
-	resv->iov_len = 0;
-	rqstp->rq_res.pages = rqstp->rq_respages + 1;
-	rqstp->rq_res.len = 0;
-	rqstp->rq_res.page_base = 0;
-	rqstp->rq_res.page_len = 0;
-	rqstp->rq_res.buflen = PAGE_SIZE;
-	rqstp->rq_res.tail[0].iov_base = NULL;
-	rqstp->rq_res.tail[0].iov_len = 0;
 	/* Will be turned off only in gss privacy case: */
 	rqstp->rq_splice_ok = 1;
 	/* Will be turned off only when NFSv4 Sessions are used */
 	rqstp->rq_usedeferral = 1;
+	rqstp->rq_dropme = false;
 
 	/* Setup reply header */
 	rqstp->rq_xprt->xpt_ops->xpo_prep_reply_hdr(rqstp);
 
-	rqstp->rq_xid = svc_getu32(argv);
 	svc_putu32(resv, rqstp->rq_xid);
 
-	dir  = svc_getnl(argv);
 	vers = svc_getnl(argv);
 
 	/* First words of reply: */
 	svc_putnl(resv, 1);		/* REPLY */
 
-	if (dir != 0)		/* direction != CALL */
-		goto err_bad_dir;
 	if (vers != 2)		/* RPC version number */
 		goto err_bad_rpc;
 
@@ -1064,6 +1054,9 @@ svc_process(struct svc_rqst *rqstp)
 		goto err_bad;
 	case SVC_DENIED:
 		goto err_bad_auth;
+	case SVC_CLOSE:
+		if (test_bit(XPT_TEMP, &rqstp->rq_xprt->xpt_flags))
+			svc_close_xprt(rqstp->rq_xprt);
 	case SVC_DROP:
 		goto dropit;
 	case SVC_COMPLETE:
@@ -1112,13 +1105,14 @@ svc_process(struct svc_rqst *rqstp)
 		*statp = procp->pc_func(rqstp, rqstp->rq_argp, rqstp->rq_resp);
 
 		/* Encode reply */
-		if (*statp == rpc_drop_reply) {
+		if (rqstp->rq_dropme) {
 			if (procp->pc_release)
 				procp->pc_release(rqstp, NULL, rqstp->rq_resp);
 			goto dropit;
 		}
-		if (*statp == rpc_success && (xdr = procp->pc_encode)
-		 && !xdr(rqstp, resv->iov_base+resv->iov_len, rqstp->rq_resp)) {
+		if (*statp == rpc_success &&
+		    (xdr = procp->pc_encode) &&
+		    !xdr(rqstp, resv->iov_base+resv->iov_len, rqstp->rq_resp)) {
 			dprintk("svc: failed to encode reply\n");
 			/* serv->sv_stats->rpcsystemerr++; */
 			*statp = rpc_system_err;
@@ -1147,24 +1141,17 @@ svc_process(struct svc_rqst *rqstp)
  sendit:
 	if (svc_authorise(rqstp))
 		goto dropit;
-	return svc_send(rqstp);
+	return 1;		/* Caller can now send it */
 
  dropit:
 	svc_authorise(rqstp);	/* doesn't hurt to call this twice */
 	dprintk("svc: svc_process dropit\n");
-	svc_drop(rqstp);
 	return 0;
 
 err_short_len:
 	svc_printk(rqstp, "short len %Zd, dropping request\n",
 			argv->iov_len);
 
-	goto dropit;			/* drop request */
-
-err_bad_dir:
-	svc_printk(rqstp, "bad direction %d, dropping request\n", dir);
-
-	serv->sv_stats->rpcbadfmt++;
 	goto dropit;			/* drop request */
 
 err_bad_rpc:
@@ -1218,6 +1205,103 @@ err_bad:
 	goto sendit;
 }
 EXPORT_SYMBOL_GPL(svc_process);
+
+/*
+ * Process the RPC request.
+ */
+int
+svc_process(struct svc_rqst *rqstp)
+{
+	struct kvec		*argv = &rqstp->rq_arg.head[0];
+	struct kvec		*resv = &rqstp->rq_res.head[0];
+	struct svc_serv		*serv = rqstp->rq_server;
+	u32			dir;
+
+	/*
+	 * Setup response xdr_buf.
+	 * Initially it has just one page
+	 */
+	rqstp->rq_resused = 1;
+	resv->iov_base = page_address(rqstp->rq_respages[0]);
+	resv->iov_len = 0;
+	rqstp->rq_res.pages = rqstp->rq_respages + 1;
+	rqstp->rq_res.len = 0;
+	rqstp->rq_res.page_base = 0;
+	rqstp->rq_res.page_len = 0;
+	rqstp->rq_res.buflen = PAGE_SIZE;
+	rqstp->rq_res.tail[0].iov_base = NULL;
+	rqstp->rq_res.tail[0].iov_len = 0;
+
+	rqstp->rq_xid = svc_getu32(argv);
+
+	dir  = svc_getnl(argv);
+	if (dir != 0) {
+		/* direction != CALL */
+		svc_printk(rqstp, "bad direction %d, dropping request\n", dir);
+		serv->sv_stats->rpcbadfmt++;
+		svc_drop(rqstp);
+		return 0;
+	}
+
+	/* Returns 1 for send, 0 for drop */
+	if (svc_process_common(rqstp, argv, resv))
+		return svc_send(rqstp);
+	else {
+		svc_drop(rqstp);
+		return 0;
+	}
+}
+
+#if defined(CONFIG_SUNRPC_BACKCHANNEL)
+/*
+ * Process a backchannel RPC request that arrived over an existing
+ * outbound connection
+ */
+int
+bc_svc_process(struct svc_serv *serv, struct rpc_rqst *req,
+	       struct svc_rqst *rqstp)
+{
+	struct kvec	*argv = &rqstp->rq_arg.head[0];
+	struct kvec	*resv = &rqstp->rq_res.head[0];
+
+	/* Build the svc_rqst used by the common processing routine */
+	rqstp->rq_xprt = serv->sv_bc_xprt;
+	rqstp->rq_xid = req->rq_xid;
+	rqstp->rq_prot = req->rq_xprt->prot;
+	rqstp->rq_server = serv;
+
+	rqstp->rq_addrlen = sizeof(req->rq_xprt->addr);
+	memcpy(&rqstp->rq_addr, &req->rq_xprt->addr, rqstp->rq_addrlen);
+	memcpy(&rqstp->rq_arg, &req->rq_rcv_buf, sizeof(rqstp->rq_arg));
+	memcpy(&rqstp->rq_res, &req->rq_snd_buf, sizeof(rqstp->rq_res));
+
+	/* reset result send buffer "put" position */
+	resv->iov_len = 0;
+
+	if (rqstp->rq_prot != IPPROTO_TCP) {
+		printk(KERN_ERR "No support for Non-TCP transports!\n");
+		BUG();
+	}
+
+	/*
+	 * Skip the next two words because they've already been
+	 * processed in the trasport
+	 */
+	svc_getu32(argv);	/* XID */
+	svc_getnl(argv);	/* CALLDIR */
+
+	/* Returns 1 for send, 0 for drop */
+	if (svc_process_common(rqstp, argv, resv)) {
+		memcpy(&req->rq_snd_buf, &rqstp->rq_res,
+						sizeof(req->rq_snd_buf));
+		return bc_send(req);
+	} else {
+		/* Nothing to do to drop request */
+		return 0;
+	}
+}
+EXPORT_SYMBOL_GPL(bc_svc_process);
+#endif /* CONFIG_SUNRPC_BACKCHANNEL */
 
 /*
  * Return (transport-specific) limit on the rpc payload.

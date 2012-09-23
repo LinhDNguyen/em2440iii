@@ -114,7 +114,7 @@ static char expect_close;
  *	C |	6.5s	65s	650s	1300s
  *	D |	7s	70s	700s	1400s
  *	E |	7.5s	75s	750s	1500s
- *	F |	8s	80s 	800s 	1600s
+ *	F |	8s	80s	800s	1600s
  *
  * Another way to say the same things is:
  *  For N=1, Timeout = (M+1) * 0.5s
@@ -280,8 +280,8 @@ static int sbc8360_close(struct inode *inode, struct file *file)
 	if (expect_close == 42)
 		sbc8360_stop();
 	else
-		printk(KERN_CRIT PFX
-			"SBC8360 device closed unexpectedly.  SBC8360 will not stop!\n");
+		printk(KERN_CRIT PFX "SBC8360 device closed unexpectedly.  "
+						"SBC8360 will not stop!\n");
 
 	clear_bit(0, &sbc8360_is_open);
 	expect_close = 0;

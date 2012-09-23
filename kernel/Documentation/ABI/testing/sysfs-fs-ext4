@@ -48,7 +48,7 @@ Description:
 		 will have its blocks allocated out of its own unique
 		 preallocation pool.
 
-What:		/sys/fs/ext4/<disk>/inode_readahead
+What:		/sys/fs/ext4/<disk>/inode_readahead_blks
 Date:		March 2008
 Contact:	"Theodore Ts'o" <tytso@mit.edu>
 Description:
@@ -79,3 +79,20 @@ Description:
 		This file is read-only and shows the number of
 		kilobytes of data that have been written to this
 		filesystem since it was mounted.
+
+What:		/sys/fs/ext4/<disk>/inode_goal
+Date:		June 2008
+Contact:	"Theodore Ts'o" <tytso@mit.edu>
+Description:
+		Tuning parameter which (if non-zero) controls the goal
+		inode used by the inode allocator in preference to
+		all other allocation heuristics.  This is intended for
+		debugging use only, and should be 0 on production
+		systems.
+
+What:		/sys/fs/ext4/<disk>/max_writeback_mb_bump
+Date:		September 2009
+Contact:	"Theodore Ts'o" <tytso@mit.edu>
+Description:
+		The maximum number of megabytes the writeback code will
+		try to write out before move on to another inode.

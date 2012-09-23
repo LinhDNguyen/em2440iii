@@ -89,9 +89,9 @@ static struct hwrng omap_rng_ops = {
 	.data_read	= omap_rng_data_read,
 };
 
-static int __init omap_rng_probe(struct platform_device *pdev)
+static int __devinit omap_rng_probe(struct platform_device *pdev)
 {
-	struct resource *res, *mem;
+	struct resource *res;
 	int ret;
 
 	/*
@@ -113,18 +113,18 @@ static int __init omap_rng_probe(struct platform_device *pdev)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 
-	if (!res)
-		return -ENOENT;
+	if (!res) {
+		ret = -ENOENT;
+		goto err_region;
+	}
 
-	mem = request_mem_region(res->start, res->end - res->start + 1,
-				 pdev->name);
-	if (mem == NULL) {
+	if (!request_mem_region(res->start, resource_size(res), pdev->name)) {
 		ret = -EBUSY;
 		goto err_region;
 	}
 
-	dev_set_drvdata(&pdev->dev, mem);
-	rng_base = ioremap(res->start, res->end - res->start + 1);
+	dev_set_drvdata(&pdev->dev, res);
+	rng_base = ioremap(res->start, resource_size(res));
 	if (!rng_base) {
 		ret = -ENOMEM;
 		goto err_ioremap;
@@ -146,7 +146,7 @@ err_register:
 	iounmap(rng_base);
 	rng_base = NULL;
 err_ioremap:
-	release_resource(mem);
+	release_mem_region(res->start, resource_size(res));
 err_region:
 	if (cpu_is_omap24xx()) {
 		clk_disable(rng_ick);
@@ -157,7 +157,7 @@ err_region:
 
 static int __exit omap_rng_remove(struct platform_device *pdev)
 {
-	struct resource *mem = dev_get_drvdata(&pdev->dev);
+	struct resource *res = dev_get_drvdata(&pdev->dev);
 
 	hwrng_unregister(&omap_rng_ops);
 
@@ -170,7 +170,7 @@ static int __exit omap_rng_remove(struct platform_device *pdev)
 		clk_put(rng_ick);
 	}
 
-	release_resource(mem);
+	release_mem_region(res->start, resource_size(res));
 	rng_base = NULL;
 
 	return 0;

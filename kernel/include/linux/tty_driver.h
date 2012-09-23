@@ -45,8 +45,19 @@
  *
  * void (*shutdown)(struct tty_struct * tty);
  *
- * 	This routine is called when a particular tty device is closed for
- *	the last time freeing up the resources.
+ * 	This routine is called synchronously when a particular tty device
+ *	is closed for the last time freeing up the resources.
+ *	Note that tty_shutdown() is not called if ops->shutdown is defined.
+ *	This means one is responsible to take care of calling ops->remove (e.g.
+ *	via tty_driver_remove_tty) and releasing tty->termios.
+ *
+ *
+ * void (*cleanup)(struct tty_struct * tty);
+ *
+ *	This routine is called asynchronously when a particular tty device
+ *	is closed for the last time freeing up the resources. This is
+ *	actually the second part of shutdown for routines that might sleep.
+ *
  *
  * int (*write)(struct tty_struct * tty,
  * 		 const unsigned char *buf, int count);
@@ -90,16 +101,15 @@
  *
  *	Note: Do not call this function directly, call tty_write_room
  * 
- * int  (*ioctl)(struct tty_struct *tty, struct file * file,
- * 	    unsigned int cmd, unsigned long arg);
+ * int  (*ioctl)(struct tty_struct *tty, unsigned int cmd, unsigned long arg);
  *
  * 	This routine allows the tty driver to implement
- *	device-specific ioctl's.  If the ioctl number passed in cmd
+ *	device-specific ioctls.  If the ioctl number passed in cmd
  * 	is not recognized by the driver, it should return ENOIOCTLCMD.
  *
  *	Optional
  *
- * long (*compat_ioctl)(struct tty_struct *tty, struct file * file,
+ * long (*compat_ioctl)(struct tty_struct *tty,,
  * 	                unsigned int cmd, unsigned long arg);
  *
  * 	implement ioctl processing for 32 bit process on 64 bit system
@@ -127,7 +137,8 @@
  * 	the line discipline are close to full, and it should somehow
  * 	signal that no more characters should be sent to the tty.
  *
- *	Optional: Always invoke via tty_throttle();
+ *	Optional: Always invoke via tty_throttle(), called under the
+ *	termios lock.
  * 
  * void (*unthrottle)(struct tty_struct * tty);
  *
@@ -135,7 +146,8 @@
  * 	that characters can now be sent to the tty without fear of
  * 	overrunning the input buffers of the line disciplines.
  * 
- *	Optional: Always invoke via tty_unthrottle();
+ *	Optional: Always invoke via tty_unthrottle(), called under the
+ *	termios lock.
  *
  * void (*stop)(struct tty_struct *tty);
  *
@@ -157,12 +169,12 @@
  * 
  * void (*hangup)(struct tty_struct *tty);
  *
- * 	This routine notifies the tty driver that it should hangup the
+ * 	This routine notifies the tty driver that it should hang up the
  * 	tty device.
  *
  *	Optional:
  *
- * int (*break_ctl)(struct tty_stuct *tty, int state);
+ * int (*break_ctl)(struct tty_struct *tty, int state);
  *
  * 	This optional routine requests the tty driver to turn on or
  * 	off BREAK status on the RS-232 port.  If state is -1,
@@ -214,14 +226,22 @@
  *	unless the tty also has a valid tty->termiox pointer.
  *
  *	Optional: Called under the termios lock
+ *
+ * int (*get_icount)(struct tty_struct *tty, struct serial_icounter *icount);
+ *
+ *	Called when the device receives a TIOCGICOUNT ioctl. Passed a kernel
+ *	structure to complete. This method is optional and will only be called
+ *	if provided (otherwise EINVAL will be returned).
  */
 
 #include <linux/fs.h>
 #include <linux/list.h>
 #include <linux/cdev.h>
+#include <linux/termios.h>
 
 struct tty_struct;
 struct tty_driver;
+struct serial_icounter_struct;
 
 struct tty_operations {
 	struct tty_struct * (*lookup)(struct tty_driver *driver,
@@ -231,15 +251,16 @@ struct tty_operations {
 	int  (*open)(struct tty_struct * tty, struct file * filp);
 	void (*close)(struct tty_struct * tty, struct file * filp);
 	void (*shutdown)(struct tty_struct *tty);
+	void (*cleanup)(struct tty_struct *tty);
 	int  (*write)(struct tty_struct * tty,
 		      const unsigned char *buf, int count);
 	int  (*put_char)(struct tty_struct *tty, unsigned char ch);
 	void (*flush_chars)(struct tty_struct *tty);
 	int  (*write_room)(struct tty_struct *tty);
 	int  (*chars_in_buffer)(struct tty_struct *tty);
-	int  (*ioctl)(struct tty_struct *tty, struct file * file,
+	int  (*ioctl)(struct tty_struct *tty,
 		    unsigned int cmd, unsigned long arg);
-	long (*compat_ioctl)(struct tty_struct *tty, struct file * file,
+	long (*compat_ioctl)(struct tty_struct *tty,
 			     unsigned int cmd, unsigned long arg);
 	void (*set_termios)(struct tty_struct *tty, struct ktermios * old);
 	void (*throttle)(struct tty_struct * tty);
@@ -252,11 +273,13 @@ struct tty_operations {
 	void (*set_ldisc)(struct tty_struct *tty);
 	void (*wait_until_sent)(struct tty_struct *tty, int timeout);
 	void (*send_xchar)(struct tty_struct *tty, char ch);
-	int (*tiocmget)(struct tty_struct *tty, struct file *file);
-	int (*tiocmset)(struct tty_struct *tty, struct file *file,
+	int (*tiocmget)(struct tty_struct *tty);
+	int (*tiocmset)(struct tty_struct *tty,
 			unsigned int set, unsigned int clear);
 	int (*resize)(struct tty_struct *tty, struct winsize *ws);
 	int (*set_termiox)(struct tty_struct *tty, struct termiox *tnew);
+	int (*get_icount)(struct tty_struct *tty,
+				struct serial_icounter_struct *icount);
 #ifdef CONFIG_CONSOLE_POLL
 	int (*poll_init)(struct tty_driver *driver, int line, char *options);
 	int (*poll_get_char)(struct tty_driver *driver, int line);
@@ -337,7 +360,7 @@ static inline struct tty_driver *tty_driver_kref_get(struct tty_driver *d)
  * 	overruns, either.)
  *
  * TTY_DRIVER_DYNAMIC_DEV --- if set, the individual tty devices need
- *	to be registered with a call to tty_register_driver() when the
+ *	to be registered with a call to tty_register_device() when the
  *	device is found in the system and unregistered with a call to
  *	tty_unregister_device() so the devices will be show up
  *	properly in sysfs.  If not set, driver->num entries will be

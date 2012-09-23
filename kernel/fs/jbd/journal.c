@@ -36,6 +36,10 @@
 #include <linux/poison.h>
 #include <linux/proc_fs.h>
 #include <linux/debugfs.h>
+#include <linux/ratelimit.h>
+
+#define CREATE_TRACE_POINTS
+#include <trace/events/jbd.h>
 
 #include <asm/uaccess.h>
 #include <asm/page.h>
@@ -73,6 +77,7 @@ EXPORT_SYMBOL(journal_errno);
 EXPORT_SYMBOL(journal_ack_err);
 EXPORT_SYMBOL(journal_clear_err);
 EXPORT_SYMBOL(log_wait_commit);
+EXPORT_SYMBOL(log_start_commit);
 EXPORT_SYMBOL(journal_start_commit);
 EXPORT_SYMBOL(journal_force_commit_nested);
 EXPORT_SYMBOL(journal_wipe);
@@ -83,6 +88,7 @@ EXPORT_SYMBOL(journal_force_commit);
 
 static int journal_convert_superblock_v1(journal_t *, journal_superblock_t *);
 static void __journal_abort_soft (journal_t *journal, int errno);
+static const char *journal_dev_name(journal_t *journal, char *buffer);
 
 /*
  * Helper function used to manage commit timeouts
@@ -276,7 +282,7 @@ static void journal_kill_thread(journal_t *journal)
 int journal_write_metadata_buffer(transaction_t *transaction,
 				  struct journal_head  *jh_in,
 				  struct journal_head **jh_out,
-				  unsigned long blocknr)
+				  unsigned int blocknr)
 {
 	int need_copy_out = 0;
 	int done_copy_out = 0;
@@ -287,6 +293,7 @@ int journal_write_metadata_buffer(transaction_t *transaction,
 	struct page *new_page;
 	unsigned int new_offset;
 	struct buffer_head *bh_in = jh2bh(jh_in);
+	journal_t *journal = transaction->t_journal;
 
 	/*
 	 * The buffer really shouldn't be locked: only the current committing
@@ -300,6 +307,11 @@ int journal_write_metadata_buffer(transaction_t *transaction,
 	J_ASSERT_BH(bh_in, buffer_jbddirty(bh_in));
 
 	new_bh = alloc_buffer_head(GFP_NOFS|__GFP_NOFAIL);
+	/* keep subsequent assertions sane */
+	new_bh->b_state = 0;
+	init_buffer(new_bh, NULL, NULL);
+	atomic_set(&new_bh->b_count, 1);
+	new_jh = journal_add_journal_head(new_bh);	/* This sleeps */
 
 	/*
 	 * If a new transaction has already done a buffer copy-out, then
@@ -361,14 +373,6 @@ repeat:
 		kunmap_atomic(mapped_data, KM_USER0);
 	}
 
-	/* keep subsequent assertions sane */
-	new_bh->b_state = 0;
-	init_buffer(new_bh, NULL, NULL);
-	atomic_set(&new_bh->b_count, 1);
-	jbd_unlock_bh_state(bh_in);
-
-	new_jh = journal_add_journal_head(new_bh);	/* This sleeps */
-
 	set_bh_page(new_bh, new_page, new_offset);
 	new_jh->b_transaction = NULL;
 	new_bh->b_size = jh2bh(jh_in)->b_size;
@@ -385,7 +389,11 @@ repeat:
 	 * copying is moved to the transaction's shadow queue.
 	 */
 	JBUFFER_TRACE(jh_in, "file as BJ_Shadow");
-	journal_file_buffer(jh_in, transaction, BJ_Shadow);
+	spin_lock(&journal->j_list_lock);
+	__journal_file_buffer(jh_in, transaction, BJ_Shadow);
+	spin_unlock(&journal->j_list_lock);
+	jbd_unlock_bh_state(bh_in);
+
 	JBUFFER_TRACE(new_jh, "file as BJ_IO");
 	journal_file_buffer(new_jh, transaction, BJ_IO);
 
@@ -432,11 +440,14 @@ int __log_space_left(journal_t *journal)
 int __log_start_commit(journal_t *journal, tid_t target)
 {
 	/*
-	 * Are we already doing a recent enough commit?
+	 * The only transaction we can possibly wait upon is the
+	 * currently running transaction (if it exists).  Otherwise,
+	 * the target tid must be an old one.
 	 */
-	if (!tid_geq(journal->j_commit_request, target)) {
+	if (journal->j_running_transaction &&
+	    journal->j_running_transaction->t_tid == target) {
 		/*
-		 * We want a new commit: OK, mark the request and wakup the
+		 * We want a new commit: OK, mark the request and wakeup the
 		 * commit thread.  We do _not_ do the commit ourselves.
 		 */
 
@@ -446,7 +457,14 @@ int __log_start_commit(journal_t *journal, tid_t target)
 			  journal->j_commit_sequence);
 		wake_up(&journal->j_wait_commit);
 		return 1;
-	}
+	} else if (!tid_geq(journal->j_commit_request, target))
+		/* This should never happen, but if it does, preserve
+		   the evidence before kjournald goes into a loop and
+		   increments j_commit_sequence beyond all recognition. */
+		WARN_ONCE(1, "jbd: bad log_start_commit: %u %u %u %u\n",
+		    journal->j_commit_request, journal->j_commit_sequence,
+		    target, journal->j_running_transaction ?
+		    journal->j_running_transaction->t_tid : 0);
 	return 0;
 }
 
@@ -562,12 +580,44 @@ int log_wait_commit(journal_t *journal, tid_t tid)
 }
 
 /*
+ * Return 1 if a given transaction has not yet sent barrier request
+ * connected with a transaction commit. If 0 is returned, transaction
+ * may or may not have sent the barrier. Used to avoid sending barrier
+ * twice in common cases.
+ */
+int journal_trans_will_send_data_barrier(journal_t *journal, tid_t tid)
+{
+	int ret = 0;
+	transaction_t *commit_trans;
+
+	if (!(journal->j_flags & JFS_BARRIER))
+		return 0;
+	spin_lock(&journal->j_state_lock);
+	/* Transaction already committed? */
+	if (tid_geq(journal->j_commit_sequence, tid))
+		goto out;
+	/*
+	 * Transaction is being committed and we already proceeded to
+	 * writing commit record?
+	 */
+	commit_trans = journal->j_committing_transaction;
+	if (commit_trans && commit_trans->t_tid == tid &&
+	    commit_trans->t_state >= T_COMMIT_RECORD)
+		goto out;
+	ret = 1;
+out:
+	spin_unlock(&journal->j_state_lock);
+	return ret;
+}
+EXPORT_SYMBOL(journal_trans_will_send_data_barrier);
+
+/*
  * Log buffer allocation routines:
  */
 
-int journal_next_log_block(journal_t *journal, unsigned long *retp)
+int journal_next_log_block(journal_t *journal, unsigned int *retp)
 {
-	unsigned long blocknr;
+	unsigned int blocknr;
 
 	spin_lock(&journal->j_state_lock);
 	J_ASSERT(journal->j_free > 1);
@@ -588,11 +638,11 @@ int journal_next_log_block(journal_t *journal, unsigned long *retp)
  * this is a no-op.  If needed, we can use j_blk_offset - everything is
  * ready.
  */
-int journal_bmap(journal_t *journal, unsigned long blocknr,
-		 unsigned long *retp)
+int journal_bmap(journal_t *journal, unsigned int blocknr,
+		 unsigned int *retp)
 {
 	int err = 0;
-	unsigned long ret;
+	unsigned int ret;
 
 	if (journal->j_inode) {
 		ret = bmap(journal->j_inode, blocknr);
@@ -602,7 +652,7 @@ int journal_bmap(journal_t *journal, unsigned long blocknr,
 			char b[BDEVNAME_SIZE];
 
 			printk(KERN_ALERT "%s: journal block not found "
-					"at offset %lu on %s\n",
+					"at offset %u on %s\n",
 				__func__,
 				blocknr,
 				bdevname(journal->j_dev, b));
@@ -628,7 +678,7 @@ int journal_bmap(journal_t *journal, unsigned long blocknr,
 struct journal_head *journal_get_descriptor_buffer(journal_t *journal)
 {
 	struct buffer_head *bh;
-	unsigned long blocknr;
+	unsigned int blocknr;
 	int err;
 
 	err = journal_next_log_block(journal, &blocknr);
@@ -733,7 +783,7 @@ journal_t * journal_init_dev(struct block_device *bdev,
 	journal->j_wbufsize = n;
 	journal->j_wbuf = kmalloc(n * sizeof(struct buffer_head*), GFP_KERNEL);
 	if (!journal->j_wbuf) {
-		printk(KERN_ERR "%s: Cant allocate bhs for commit thread\n",
+		printk(KERN_ERR "%s: Can't allocate bhs for commit thread\n",
 			__func__);
 		goto out_err;
 	}
@@ -754,6 +804,7 @@ journal_t * journal_init_dev(struct block_device *bdev,
 
 	return journal;
 out_err:
+	kfree(journal->j_wbuf);
 	kfree(journal);
 	return NULL;
 }
@@ -772,7 +823,7 @@ journal_t * journal_init_inode (struct inode *inode)
 	journal_t *journal = journal_init_common();
 	int err;
 	int n;
-	unsigned long blocknr;
+	unsigned int blocknr;
 
 	if (!journal)
 		return NULL;
@@ -793,7 +844,7 @@ journal_t * journal_init_inode (struct inode *inode)
 	journal->j_wbufsize = n;
 	journal->j_wbuf = kmalloc(n * sizeof(struct buffer_head*), GFP_KERNEL);
 	if (!journal->j_wbuf) {
-		printk(KERN_ERR "%s: Cant allocate bhs for commit thread\n",
+		printk(KERN_ERR "%s: Can't allocate bhs for commit thread\n",
 			__func__);
 		goto out_err;
 	}
@@ -801,7 +852,7 @@ journal_t * journal_init_inode (struct inode *inode)
 	err = journal_bmap(journal, 0, &blocknr);
 	/* If that failed, give up */
 	if (err) {
-		printk(KERN_ERR "%s: Cannnot locate journal superblock\n",
+		printk(KERN_ERR "%s: Cannot locate journal superblock\n",
 		       __func__);
 		goto out_err;
 	}
@@ -818,6 +869,7 @@ journal_t * journal_init_inode (struct inode *inode)
 
 	return journal;
 out_err:
+	kfree(journal->j_wbuf);
 	kfree(journal);
 	return NULL;
 }
@@ -844,10 +896,16 @@ static void journal_fail_superblock (journal_t *journal)
 static int journal_reset(journal_t *journal)
 {
 	journal_superblock_t *sb = journal->j_superblock;
-	unsigned long first, last;
+	unsigned int first, last;
 
 	first = be32_to_cpu(sb->s_first);
 	last = be32_to_cpu(sb->s_maxlen);
+	if (first + JFS_MIN_JOURNAL_BLOCKS > last + 1) {
+		printk(KERN_ERR "JBD: Journal too short (blocks %u-%u).\n",
+		       first, last);
+		journal_fail_superblock(journal);
+		return -EINVAL;
+	}
 
 	journal->j_first = first;
 	journal->j_last = last;
@@ -877,7 +935,7 @@ static int journal_reset(journal_t *journal)
  **/
 int journal_create(journal_t *journal)
 {
-	unsigned long blocknr;
+	unsigned int blocknr;
 	struct buffer_head *bh;
 	journal_superblock_t *sb;
 	int i, err;
@@ -907,6 +965,8 @@ int journal_create(journal_t *journal)
 		if (err)
 			return err;
 		bh = __getblk(journal->j_dev, blocknr, journal->j_blocksize);
+		if (unlikely(!bh))
+			return -ENOMEM;
 		lock_buffer(bh);
 		memset (bh->b_data, 0, journal->j_blocksize);
 		BUFFER_TRACE(bh, "marking dirty");
@@ -961,14 +1021,31 @@ void journal_update_superblock(journal_t *journal, int wait)
 	if (sb->s_start == 0 && journal->j_tail_sequence ==
 				journal->j_transaction_sequence) {
 		jbd_debug(1,"JBD: Skipping superblock update on recovered sb "
-			"(start %ld, seq %d, errno %d)\n",
+			"(start %u, seq %d, errno %d)\n",
 			journal->j_tail, journal->j_tail_sequence,
 			journal->j_errno);
 		goto out;
 	}
 
+	if (buffer_write_io_error(bh)) {
+		char b[BDEVNAME_SIZE];
+		/*
+		 * Oh, dear.  A previous attempt to write the journal
+		 * superblock failed.  This could happen because the
+		 * USB device was yanked out.  Or it could happen to
+		 * be a transient write error and maybe the block will
+		 * be remapped.  Nothing we can do but to retry the
+		 * write and hope for the best.
+		 */
+		printk(KERN_ERR "JBD: previous I/O error detected "
+		       "for journal superblock update for %s.\n",
+		       journal_dev_name(journal, b));
+		clear_buffer_write_io_error(bh);
+		set_buffer_uptodate(bh);
+	}
+
 	spin_lock(&journal->j_state_lock);
-	jbd_debug(1,"JBD: updating superblock (start %ld, seq %d, errno %d)\n",
+	jbd_debug(1,"JBD: updating superblock (start %u, seq %d, errno %d)\n",
 		  journal->j_tail, journal->j_tail_sequence, journal->j_errno);
 
 	sb->s_sequence = cpu_to_be32(journal->j_tail_sequence);
@@ -978,11 +1055,20 @@ void journal_update_superblock(journal_t *journal, int wait)
 
 	BUFFER_TRACE(bh, "marking dirty");
 	mark_buffer_dirty(bh);
-	if (wait)
+	if (wait) {
 		sync_dirty_buffer(bh);
-	else
-		ll_rw_block(SWRITE, 1, &bh);
+		if (buffer_write_io_error(bh)) {
+			char b[BDEVNAME_SIZE];
+			printk(KERN_ERR "JBD: I/O error detected "
+			       "when updating journal superblock for %s.\n",
+			       journal_dev_name(journal, b));
+			clear_buffer_write_io_error(bh);
+			set_buffer_uptodate(bh);
+		}
+	} else
+		write_dirty_buffer(bh, WRITE);
 
+	trace_jbd_update_superblock_end(journal, wait);
 out:
 	/* If we have just flushed the log (by marking s_start==0), then
 	 * any future commit will have to be careful to update the
@@ -1046,6 +1132,14 @@ static int journal_get_superblock(journal_t *journal)
 		journal->j_maxlen = be32_to_cpu(sb->s_maxlen);
 	else if (be32_to_cpu(sb->s_maxlen) > journal->j_maxlen) {
 		printk (KERN_WARNING "JBD: journal file too short\n");
+		goto out;
+	}
+
+	if (be32_to_cpu(sb->s_first) == 0 ||
+	    be32_to_cpu(sb->s_first) >= journal->j_maxlen) {
+		printk(KERN_WARNING
+			"JBD: Invalid start block of journal: %u\n",
+			be32_to_cpu(sb->s_first));
 		goto out;
 	}
 
@@ -1146,6 +1240,7 @@ int journal_destroy(journal_t *journal)
 {
 	int err = 0;
 
+	
 	/* Wait for the commit thread to wake up and die. */
 	journal_kill_thread(journal);
 
@@ -1237,12 +1332,8 @@ int journal_check_used_features (journal_t *journal, unsigned long compat,
 int journal_check_available_features (journal_t *journal, unsigned long compat,
 				      unsigned long ro, unsigned long incompat)
 {
-	journal_superblock_t *sb;
-
 	if (!compat && !ro && !incompat)
 		return 1;
-
-	sb = journal->j_superblock;
 
 	/* We can support any known requested features iff the
 	 * superblock is in version 2.  Otherwise we fail to support any
@@ -1363,7 +1454,7 @@ int journal_flush(journal_t *journal)
 {
 	int err = 0;
 	transaction_t *transaction = NULL;
-	unsigned long old_tail;
+	unsigned int old_tail;
 
 	spin_lock(&journal->j_state_lock);
 
@@ -1437,7 +1528,6 @@ int journal_flush(journal_t *journal)
 
 int journal_wipe(journal_t *journal, int write)
 {
-	journal_superblock_t *sb;
 	int err = 0;
 
 	J_ASSERT (!(journal->j_flags & JFS_LOADED));
@@ -1445,8 +1535,6 @@ int journal_wipe(journal_t *journal, int write)
 	err = load_superblock(journal);
 	if (err)
 		return err;
-
-	sb = journal->j_superblock;
 
 	if (!journal->j_tail)
 		goto no_recovery;
@@ -1682,7 +1770,6 @@ static void journal_destroy_journal_head_cache(void)
 static struct journal_head *journal_alloc_journal_head(void)
 {
 	struct journal_head *ret;
-	static unsigned long last_warning;
 
 #ifdef CONFIG_JBD_DEBUG
 	atomic_inc(&nr_journal_heads);
@@ -1690,11 +1777,9 @@ static struct journal_head *journal_alloc_journal_head(void)
 	ret = kmem_cache_alloc(journal_head_cache, GFP_NOFS);
 	if (ret == NULL) {
 		jbd_debug(1, "out of memory for journal_head\n");
-		if (time_after(jiffies, last_warning + 5*HZ)) {
-			printk(KERN_NOTICE "ENOMEM in %s, retrying.\n",
-			       __func__);
-			last_warning = jiffies;
-		}
+		printk_ratelimited(KERN_NOTICE "ENOMEM in %s, retrying.\n",
+				   __func__);
+
 		while (ret == NULL) {
 			yield();
 			ret = kmem_cache_alloc(journal_head_cache, GFP_NOFS);
@@ -1726,10 +1811,9 @@ static void journal_free_journal_head(struct journal_head *jh)
  * When a buffer has its BH_JBD bit set it is immune from being released by
  * core kernel code, mainly via ->b_count.
  *
- * A journal_head may be detached from its buffer_head when the journal_head's
- * b_transaction, b_cp_transaction and b_next_transaction pointers are NULL.
- * Various places in JBD call journal_remove_journal_head() to indicate that the
- * journal_head can be dropped if needed.
+ * A journal_head is detached from its buffer_head when the journal_head's
+ * b_jcount reaches zero. Running transaction (b_transaction) and checkpoint
+ * transaction (b_cp_transaction) hold their references to b_jcount.
  *
  * Various places in the kernel want to attach a journal_head to a buffer_head
  * _before_ attaching the journal_head to a transaction.  To protect the
@@ -1742,17 +1826,16 @@ static void journal_free_journal_head(struct journal_head *jh)
  *	(Attach a journal_head if needed.  Increments b_jcount)
  *	struct journal_head *jh = journal_add_journal_head(bh);
  *	...
- *	jh->b_transaction = xxx;
- *	journal_put_journal_head(jh);
- *
- * Now, the journal_head's b_jcount is zero, but it is safe from being released
- * because it has a non-zero b_transaction.
+ *      (Get another reference for transaction)
+ *      journal_grab_journal_head(bh);
+ *      jh->b_transaction = xxx;
+ *      (Put original reference)
+ *      journal_put_journal_head(jh);
  */
 
 /*
  * Give a buffer_head a journal_head.
  *
- * Doesn't need the journal lock.
  * May sleep.
  */
 struct journal_head *journal_add_journal_head(struct buffer_head *bh)
@@ -1816,61 +1899,29 @@ static void __journal_remove_journal_head(struct buffer_head *bh)
 	struct journal_head *jh = bh2jh(bh);
 
 	J_ASSERT_JH(jh, jh->b_jcount >= 0);
-
-	get_bh(bh);
-	if (jh->b_jcount == 0) {
-		if (jh->b_transaction == NULL &&
-				jh->b_next_transaction == NULL &&
-				jh->b_cp_transaction == NULL) {
-			J_ASSERT_JH(jh, jh->b_jlist == BJ_None);
-			J_ASSERT_BH(bh, buffer_jbd(bh));
-			J_ASSERT_BH(bh, jh2bh(jh) == bh);
-			BUFFER_TRACE(bh, "remove journal_head");
-			if (jh->b_frozen_data) {
-				printk(KERN_WARNING "%s: freeing "
-						"b_frozen_data\n",
-						__func__);
-				jbd_free(jh->b_frozen_data, bh->b_size);
-			}
-			if (jh->b_committed_data) {
-				printk(KERN_WARNING "%s: freeing "
-						"b_committed_data\n",
-						__func__);
-				jbd_free(jh->b_committed_data, bh->b_size);
-			}
-			bh->b_private = NULL;
-			jh->b_bh = NULL;	/* debug, really */
-			clear_buffer_jbd(bh);
-			__brelse(bh);
-			journal_free_journal_head(jh);
-		} else {
-			BUFFER_TRACE(bh, "journal_head was locked");
-		}
+	J_ASSERT_JH(jh, jh->b_transaction == NULL);
+	J_ASSERT_JH(jh, jh->b_next_transaction == NULL);
+	J_ASSERT_JH(jh, jh->b_cp_transaction == NULL);
+	J_ASSERT_JH(jh, jh->b_jlist == BJ_None);
+	J_ASSERT_BH(bh, buffer_jbd(bh));
+	J_ASSERT_BH(bh, jh2bh(jh) == bh);
+	BUFFER_TRACE(bh, "remove journal_head");
+	if (jh->b_frozen_data) {
+		printk(KERN_WARNING "%s: freeing b_frozen_data\n", __func__);
+		jbd_free(jh->b_frozen_data, bh->b_size);
 	}
+	if (jh->b_committed_data) {
+		printk(KERN_WARNING "%s: freeing b_committed_data\n", __func__);
+		jbd_free(jh->b_committed_data, bh->b_size);
+	}
+	bh->b_private = NULL;
+	jh->b_bh = NULL;	/* debug, really */
+	clear_buffer_jbd(bh);
+	journal_free_journal_head(jh);
 }
 
 /*
- * journal_remove_journal_head(): if the buffer isn't attached to a transaction
- * and has a zero b_jcount then remove and release its journal_head.   If we did
- * see that the buffer is not used by any transaction we also "logically"
- * decrement ->b_count.
- *
- * We in fact take an additional increment on ->b_count as a convenience,
- * because the caller usually wants to do additional things with the bh
- * after calling here.
- * The caller of journal_remove_journal_head() *must* run __brelse(bh) at some
- * time.  Once the caller has run __brelse(), the buffer is eligible for
- * reaping by try_to_free_buffers().
- */
-void journal_remove_journal_head(struct buffer_head *bh)
-{
-	jbd_lock_bh_journal_head(bh);
-	__journal_remove_journal_head(bh);
-	jbd_unlock_bh_journal_head(bh);
-}
-
-/*
- * Drop a reference on the passed journal_head.  If it fell to zero then try to
+ * Drop a reference on the passed journal_head.  If it fell to zero then
  * release the journal_head from the buffer_head.
  */
 void journal_put_journal_head(struct journal_head *jh)
@@ -1880,11 +1931,12 @@ void journal_put_journal_head(struct journal_head *jh)
 	jbd_lock_bh_journal_head(bh);
 	J_ASSERT_JH(jh, jh->b_jcount > 0);
 	--jh->b_jcount;
-	if (!jh->b_jcount && !jh->b_transaction) {
+	if (!jh->b_jcount) {
 		__journal_remove_journal_head(bh);
+		jbd_unlock_bh_journal_head(bh);
 		__brelse(bh);
-	}
-	jbd_unlock_bh_journal_head(bh);
+	} else
+		jbd_unlock_bh_journal_head(bh);
 }
 
 /*
@@ -1902,7 +1954,7 @@ static void __init jbd_create_debugfs_entry(void)
 {
 	jbd_debugfs_dir = debugfs_create_dir("jbd", NULL);
 	if (jbd_debugfs_dir)
-		jbd_debug = debugfs_create_u8("jbd-debug", S_IRUGO,
+		jbd_debug = debugfs_create_u8("jbd-debug", S_IRUGO | S_IWUSR,
 					       jbd_debugfs_dir,
 					       &journal_enable_debug);
 }

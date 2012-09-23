@@ -22,7 +22,10 @@
 ************************************************************************/
 #include <linux/clocksource.h>
 #include <linux/jiffies.h>
+#include <linux/module.h>
 #include <linux/init.h>
+
+#include "tick-internal.h"
 
 /* The Jiffies based clocksource is the lowest common
  * denominator clock source which should function on
@@ -31,7 +34,7 @@
  * inaccuracies caused by missed or lost timer
  * interrupts and the inability for the timer
  * interrupt hardware to accuratly tick at the
- * requested HZ value. It is also not reccomended
+ * requested HZ value. It is also not recommended
  * for "tick-less" systems.
  */
 #define NSEC_PER_JIFFY	((u32)((((u64)NSEC_PER_SEC)<<8)/ACTHZ))
@@ -61,9 +64,25 @@ struct clocksource clocksource_jiffies = {
 	.read		= jiffies_read,
 	.mask		= 0xffffffff, /*32bits*/
 	.mult		= NSEC_PER_JIFFY << JIFFIES_SHIFT, /* details above */
-	.mult_orig	= NSEC_PER_JIFFY << JIFFIES_SHIFT,
 	.shift		= JIFFIES_SHIFT,
 };
+
+#if (BITS_PER_LONG < 64)
+u64 get_jiffies_64(void)
+{
+	unsigned long seq;
+	u64 ret;
+
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		ret = jiffies_64;
+	} while (read_seqretry(&xtime_lock, seq));
+	return ret;
+}
+EXPORT_SYMBOL(get_jiffies_64);
+#endif
+
+EXPORT_SYMBOL(jiffies);
 
 static int __init init_jiffies_clocksource(void)
 {
@@ -71,3 +90,8 @@ static int __init init_jiffies_clocksource(void)
 }
 
 core_initcall(init_jiffies_clocksource);
+
+struct clocksource * __init __weak clocksource_default_clock(void)
+{
+	return &clocksource_jiffies;
+}

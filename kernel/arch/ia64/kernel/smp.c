@@ -32,7 +32,7 @@
 #include <linux/bitops.h>
 #include <linux/kexec.h>
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/current.h>
 #include <asm/delay.h>
 #include <asm/machvec.h>
@@ -58,7 +58,8 @@ static struct local_tlb_flush_counts {
 	unsigned int count;
 } __attribute__((__aligned__(32))) local_tlb_flush_counts[NR_CPUS];
 
-static DEFINE_PER_CPU(unsigned short, shadow_flush_counts[NR_CPUS]) ____cacheline_aligned;
+static DEFINE_PER_CPU_SHARED_ALIGNED(unsigned short [NR_CPUS],
+				     shadow_flush_counts);
 
 #define IPI_CALL_FUNC		0
 #define IPI_CPU_STOP		1
@@ -66,7 +67,7 @@ static DEFINE_PER_CPU(unsigned short, shadow_flush_counts[NR_CPUS]) ____cachelin
 #define IPI_KDUMP_CPU_STOP	3
 
 /* This needs to be cacheline aligned because it is written to by *other* CPUs.  */
-static DEFINE_PER_CPU_SHARED_ALIGNED(u64, ipi_operation);
+static DEFINE_PER_CPU_SHARED_ALIGNED(unsigned long, ipi_operation);
 
 extern void cpu_halt (void);
 
@@ -292,6 +293,7 @@ smp_flush_tlb_all (void)
 void
 smp_flush_tlb_mm (struct mm_struct *mm)
 {
+	cpumask_var_t cpus;
 	preempt_disable();
 	/* this happens for the common case of a single-threaded fork():  */
 	if (likely(mm == current->active_mm && atomic_read(&mm->mm_users) == 1))
@@ -300,9 +302,15 @@ smp_flush_tlb_mm (struct mm_struct *mm)
 		preempt_enable();
 		return;
 	}
-
-	smp_call_function_mask(mm->cpu_vm_mask,
-		(void (*)(void *))local_finish_flush_tlb_mm, mm, 1);
+	if (!alloc_cpumask_var(&cpus, GFP_ATOMIC)) {
+		smp_call_function((void (*)(void *))local_finish_flush_tlb_mm,
+			mm, 1);
+	} else {
+		cpumask_copy(cpus, mm_cpumask(mm));
+		smp_call_function_many(cpus,
+			(void (*)(void *))local_finish_flush_tlb_mm, mm, 1);
+		free_cpumask_var(cpus);
+	}
 	local_irq_disable();
 	local_finish_flush_tlb_mm(mm);
 	local_irq_enable();

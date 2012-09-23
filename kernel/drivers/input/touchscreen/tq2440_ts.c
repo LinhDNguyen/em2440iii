@@ -1,6 +1,6 @@
 /*************************************
 
-NAME:tq2440_ts.c
+NAME:EmbedSky_hello.c
 COPYRIGHT:www.embedsky.net
 
 *************************************/
@@ -20,6 +20,8 @@ COPYRIGHT:www.embedsky.net
 
 #include <plat/regs-adc.h>
 #include <mach/regs-gpio.h>
+
+#include <linux/gpio.h>
 
 /* For ts.dev.id.version */
 #define S3C2410TSVERSION	0x0101
@@ -42,15 +44,15 @@ extern struct semaphore ADC_LOCK;
 static int OwnADC = 0;
 
 static void __iomem *base_addr;
-/*
+
 static inline void tq2440_ts_connect(void)
 {
-	s3c2410_gpio_cfgpin(S3C2410_GPG12, S3C2410_GPG12_XMON);
-	s3c2410_gpio_cfgpin(S3C2410_GPG13, S3C2410_GPG13_nXPON);
-	s3c2410_gpio_cfgpin(S3C2410_GPG14, S3C2410_GPG14_YMON);
-	s3c2410_gpio_cfgpin(S3C2410_GPG15, S3C2410_GPG15_nYPON);
+	s3c_gpio_cfgpin(S3C2410_GPG(12), S3C2410_GPG12_XMON);
+	s3c_gpio_cfgpin(S3C2410_GPG(13), S3C2410_GPG13_nXPON);
+	s3c_gpio_cfgpin(S3C2410_GPG(14), S3C2410_GPG14_YMON);
+	s3c_gpio_cfgpin(S3C2410_GPG(15), S3C2410_GPG15_nYPON);
 }
-*/
+
 static void touch_timer_fire(unsigned long data)
 {
   	unsigned long data0;
@@ -189,7 +191,7 @@ static int __init tq2440ts_init(void)
 	}
 
 	/* Configure GPIOs */
-//	tq2440_ts_connect();
+	tq2440_ts_connect();
 
 	iowrite32(S3C2410_ADCCON_PRSCEN | S3C2410_ADCCON_PRSCVL(0xFF),base_addr+S3C2410_ADCCON);
 	iowrite32(0xffff,  base_addr+S3C2410_ADCDLY);

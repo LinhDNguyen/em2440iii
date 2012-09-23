@@ -155,7 +155,7 @@ static int cx22700_set_tps (struct cx22700_state *state, struct dvb_ofdm_paramet
 	    p->hierarchy_information > HIERARCHY_4)
 		return -EINVAL;
 
-	if (p->bandwidth < BANDWIDTH_8_MHZ && p->bandwidth > BANDWIDTH_6_MHZ)
+	if (p->bandwidth < BANDWIDTH_8_MHZ || p->bandwidth > BANDWIDTH_6_MHZ)
 		return -EINVAL;
 
 	if (p->bandwidth == BANDWIDTH_7_MHZ)
@@ -179,7 +179,7 @@ static int cx22700_set_tps (struct cx22700_state *state, struct dvb_ofdm_paramet
 	cx22700_writereg (state, 0x06, val);
 
 	cx22700_writereg (state, 0x08, 0x04 | 0x02);  /* use user tps parameters */
-	cx22700_writereg (state, 0x08, 0x04);         /* restart aquisition */
+	cx22700_writereg (state, 0x08, 0x04);         /* restart acquisition */
 
 	return 0;
 }
@@ -380,7 +380,7 @@ struct dvb_frontend* cx22700_attach(const struct cx22700_config* config,
 	struct cx22700_state* state = NULL;
 
 	/* allocate memory for the internal state */
-	state = kmalloc(sizeof(struct cx22700_state), GFP_KERNEL);
+	state = kzalloc(sizeof(struct cx22700_state), GFP_KERNEL);
 	if (state == NULL) goto error;
 
 	/* setup the state */

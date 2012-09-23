@@ -6,7 +6,7 @@
 
   Copyright (c) 2005 Martin Langer <martin-langer@gmx.de>,
   Copyright (c) 2005, 2006 Stefano Brivio <stefano.brivio@polimi.it>
-  Copyright (c) 2005-2007 Michael Buesch <mb@bu3sch.de>
+  Copyright (c) 2005-2007 Michael Buesch <m@bues.ch>
   Copyright (c) 2005, 2006 Danny van Dyk <kugelfang@gentoo.org>
   Copyright (c) 2005, 2006 Andreas Jaggi <andreas.jaggi@waterwave.ch>
 
@@ -34,6 +34,7 @@
 
 #include <linux/delay.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 
 
 static struct b43_lo_calib *b43_find_lo_calib(struct b43_txpower_lo_control *lo,
@@ -97,7 +98,7 @@ static u16 lo_measure_feedthrough(struct b43_wldev *dev,
 		rfover |= pga;
 		rfover |= lna;
 		rfover |= trsw_rx;
-		if ((dev->dev->bus->sprom.boardflags_lo & B43_BFL_EXTLNA)
+		if ((dev->dev->bus_sprom->boardflags_lo & B43_BFL_EXTLNA)
 		    && phy->rev > 6)
 			rfover |= B43_PHY_RFOVERVAL_EXTLNA;
 
@@ -300,14 +301,12 @@ static void lo_measure_gain_values(struct b43_wldev *dev,
 		max_rx_gain = 0;
 
 	if (has_loopback_gain(phy)) {
-		int trsw_rx = 0;
 		int trsw_rx_gain;
 
 		if (use_trsw_rx) {
 			trsw_rx_gain = gphy->trsw_rx_gain / 2;
 			if (max_rx_gain >= trsw_rx_gain) {
 				trsw_rx_gain = max_rx_gain - trsw_rx_gain;
-				trsw_rx = 0x20;
 			}
 		} else
 			trsw_rx_gain = max_rx_gain;
@@ -386,7 +385,7 @@ struct lo_g_saved_values {
 static void lo_measure_setup(struct b43_wldev *dev,
 			     struct lo_g_saved_values *sav)
 {
-	struct ssb_sprom *sprom = &dev->dev->bus->sprom;
+	struct ssb_sprom *sprom = dev->dev->bus_sprom;
 	struct b43_phy *phy = &dev->phy;
 	struct b43_phy_g *gphy = phy->g;
 	struct b43_txpower_lo_control *lo = gphy->lo_control;
@@ -477,7 +476,7 @@ static void lo_measure_setup(struct b43_wldev *dev,
 	} else
 		b43_phy_write(dev, B43_PHY_CCK(0x2B), 0x0802);
 	if (phy->rev >= 2)
-		b43_dummy_transmission(dev);
+		b43_dummy_transmission(dev, false, true);
 	b43_gphy_channel_switch(dev, 6, 0);
 	b43_radio_read16(dev, 0x51);	/* dummy read */
 	if (phy->type == B43_PHYTYPE_G)

@@ -19,6 +19,7 @@
 #include <linux/rtc.h>
 #include <linux/spi/spi.h>
 #include <linux/bcd.h>
+#include <linux/slab.h>
 
 #define DS1390_REG_100THS		0x00
 #define DS1390_REG_SECONDS		0x01
@@ -157,7 +158,7 @@ static int __devinit ds1390_probe(struct spi_device *spi)
 
 static int __devexit ds1390_remove(struct spi_device *spi)
 {
-	struct ds1390 *chip = platform_get_drvdata(spi);
+	struct ds1390 *chip = spi_get_drvdata(spi);
 
 	rtc_device_unregister(chip->rtc);
 	kfree(chip);
@@ -189,3 +190,4 @@ module_exit(ds1390_exit);
 MODULE_DESCRIPTION("Dallas/Maxim DS1390/93/94 SPI RTC driver");
 MODULE_AUTHOR("Mark Jackson <mpfj@mimc.co.uk>");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("spi:rtc-ds1390");

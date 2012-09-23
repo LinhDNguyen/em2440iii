@@ -11,6 +11,7 @@
 #include <linux/list.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/gpio.h>
 #include <linux/sysdev.h>
 #include <linux/platform_device.h>
 
@@ -34,6 +35,7 @@
 #include <plat/nand.h>
 
 #include <plat/common-EmbedSky.h>
+#include <plat/gpio-cfg.h>
 #include <plat/devs.h>
 #include <plat/pm.h>
 
@@ -41,9 +43,9 @@
 /* NAND parititon from 2.4.18-swl5 */
 
 static struct mtd_partition EmbedSky_default_nand_part[] = {
-#if	defined(CONFIG_EmbedSky_64MB_NAND)
+#if	defined(CONFIG_Boardcon_64MB_NAND)
 	[0] = {
-		.name	= "Boardcon_Board_uboot",
+		.name	= "Boardcon_Board_uboot", 
 		.offset	= 0x00000000,
 		.size	= 0x00040000,
 	},
@@ -57,7 +59,7 @@ static struct mtd_partition EmbedSky_default_nand_part[] = {
 		.offset	= 0x00400000,
 		.size	= 0x03BF8000,
 	}
-#elif	defined(CONFIG_EmbedSky_128MB_NAND)
+#elif	defined(CONFIG_Boardcon_128MB_NAND)
 	[0] = {
 		.name	= "Boardcon_Board_uboot",
 		.offset	= 0x00000000,
@@ -73,7 +75,7 @@ static struct mtd_partition EmbedSky_default_nand_part[] = {
 		.offset	= 0x00400000,
 		.size	= 0x07BA0000,
 	}
-#elif	defined(CONFIG_EmbedSky_more_than_256MB_NAND)
+#elif	defined(CONFIG_Boardcon_more_than_256MB_NAND)
 	[0] = {
 		.name	= "Boardcon_Board_uboot",
 		.offset	= 0x00000000,
@@ -89,7 +91,7 @@ static struct mtd_partition EmbedSky_default_nand_part[] = {
 		.offset	= 0x00400000,
 		.size	= 0x0FB80000,
 	}
-#elif	defined(CONFIG_EmbedSky_1GB_NAND)
+#elif	defined(CONFIG_Boardcon_1GB_NAND)
 	[0] = {
 		.name	= "Boardcon_Board_uboot",
 		.offset	= 0x00000000,
@@ -111,9 +113,9 @@ static struct mtd_partition EmbedSky_default_nand_part[] = {
 static struct s3c2410_nand_set EmbedSky_nand_sets[] = {
 	[0] = {
 		.name		= "NAND",
-		.nr_chips		= 1,
+		.nr_chips	= 1,
 		.nr_partitions	= ARRAY_SIZE(EmbedSky_default_nand_part),
-		.partitions		= EmbedSky_default_nand_part,
+		.partitions	= EmbedSky_default_nand_part,
 	},
 };
 
@@ -122,10 +124,10 @@ static struct s3c2410_nand_set EmbedSky_nand_sets[] = {
 */
 
 static struct s3c2410_platform_nand EmbedSky_nand_info = {
-	.tacls		= 10,
-	.twrph0		= 25,
-	.twrph1		= 10,
-	.nr_sets		= ARRAY_SIZE(EmbedSky_nand_sets),
+	.tacls		= 20,
+	.twrph0		= 60,
+	.twrph1		= 20,
+	.nr_sets	= ARRAY_SIZE(EmbedSky_nand_sets),
 	.sets		= EmbedSky_nand_sets,
 };
 
@@ -138,7 +140,7 @@ static struct platform_device __initdata *EmbedSky_devs[] = {
 
 void __init EmbedSky_machine_init(void)
 {
-	s3c_device_nand.dev.platform_data = &EmbedSky_nand_info;
+	s3c_nand_set_platdata(&EmbedSky_nand_info);
 
 	platform_add_devices(EmbedSky_devs, ARRAY_SIZE(EmbedSky_devs));
 

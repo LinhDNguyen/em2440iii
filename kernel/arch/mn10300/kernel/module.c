@@ -1,6 +1,6 @@
 /* MN10300 Kernel module helper routines
  *
- * Copyright (C) 2007, 2008 Red Hat, Inc. All Rights Reserved.
+ * Copyright (C) 2007, 2008, 2009 Red Hat, Inc. All Rights Reserved.
  * Written by Mark Salter (msalter@redhat.com)
  * - Derived from arch/i386/kernel/module.c
  *
@@ -32,38 +32,6 @@
 #define DEBUGP(fmt, ...)
 #endif
 
-/*
- * allocate storage for a module
- */
-void *module_alloc(unsigned long size)
-{
-	if (size == 0)
-		return NULL;
-	return vmalloc_exec(size);
-}
-
-/*
- * free memory returned from module_alloc()
- */
-void module_free(struct module *mod, void *module_region)
-{
-	vfree(module_region);
-	/* FIXME: If module_region == mod->init_region, trim exception
-	 * table entries. */
-}
-
-/*
- * allow the arch to fix up the section table
- * - we don't need anything special
- */
-int module_frob_arch_sections(Elf_Ehdr *hdr,
-			      Elf_Shdr *sechdrs,
-			      char *secstrings,
-			      struct module *mod)
-{
-	return 0;
-}
-
 static void reloc_put16(uint8_t *p, uint32_t val)
 {
 	p[0] = val & 0xff;
@@ -83,20 +51,6 @@ static void reloc_put32(uint8_t *p, uint32_t val)
 }
 
 /*
- * apply a REL relocation
- */
-int apply_relocate(Elf32_Shdr *sechdrs,
-		   const char *strtab,
-		   unsigned int symindex,
-		   unsigned int relsec,
-		   struct module *me)
-{
-	printk(KERN_ERR "module %s: RELOCATION unsupported\n",
-	       me->name);
-	return -ENOEXEC;
-}
-
-/*
  * apply a RELA relocation
  */
 int apply_relocate_add(Elf32_Shdr *sechdrs,
@@ -105,10 +59,10 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 		       unsigned int relsec,
 		       struct module *me)
 {
-	unsigned int i;
+	unsigned int i, sym_diff_seen = 0;
 	Elf32_Rela *rel = (void *)sechdrs[relsec].sh_addr;
 	Elf32_Sym *sym;
-	Elf32_Addr relocation;
+	Elf32_Addr relocation, sym_diff_val = 0;
 	uint8_t *location;
 	uint32_t value;
 
@@ -127,6 +81,22 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 
 		/* this is the adjustment to be made */
 		relocation = sym->st_value + rel[i].r_addend;
+
+		if (sym_diff_seen) {
+			switch (ELF32_R_TYPE(rel[i].r_info)) {
+			case R_MN10300_32:
+			case R_MN10300_24:
+			case R_MN10300_16:
+			case R_MN10300_8:
+				relocation -= sym_diff_val;
+				sym_diff_seen = 0;
+				break;
+			default:
+				printk(KERN_ERR "module %s: Unexpected SYM_DIFF relocation: %u\n",
+				       me->name, ELF32_R_TYPE(rel[i].r_info));
+				return -ENOEXEC;
+			}
+		}
 
 		switch (ELF32_R_TYPE(rel[i].r_info)) {
 			/* for the first four relocation types, we simply
@@ -159,29 +129,28 @@ int apply_relocate_add(Elf32_Shdr *sechdrs,
 			*location = relocation - (uint32_t) location;
 			break;
 
+		case R_MN10300_SYM_DIFF:
+			/* This is used to adjust the next reloc as required
+			 * by relaxation. */
+			sym_diff_seen = 1;
+			sym_diff_val = sym->st_value;
+			break;
+
+		case R_MN10300_ALIGN:
+			/* Just ignore the ALIGN relocs.
+			 * Only interesting if kernel performed relaxation. */
+			continue;
+
 		default:
 			printk(KERN_ERR "module %s: Unknown relocation: %u\n",
 			       me->name, ELF32_R_TYPE(rel[i].r_info));
 			return -ENOEXEC;
 		}
 	}
+	if (sym_diff_seen) {
+		printk(KERN_ERR "module %s: Nothing follows SYM_DIFF relocation: %u\n",
+				       me->name, ELF32_R_TYPE(rel[i].r_info));
+		return -ENOEXEC;
+	}
 	return 0;
-}
-
-/*
- * finish loading the module
- */
-int module_finalize(const Elf_Ehdr *hdr,
-		    const Elf_Shdr *sechdrs,
-		    struct module *me)
-{
-	return module_bug_finalize(hdr, sechdrs, me);
-}
-
-/*
- * finish clearing the module
- */
-void module_arch_cleanup(struct module *mod)
-{
-	module_bug_cleanup(mod);
 }

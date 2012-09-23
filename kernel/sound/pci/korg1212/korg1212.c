@@ -418,7 +418,7 @@ module_param_array(enable, bool, NULL, 0444);
 MODULE_PARM_DESC(enable, "Enable Korg 1212 soundcard.");
 MODULE_AUTHOR("Haroldo Gamal <gamal@alternex.com.br>");
 
-static struct pci_device_id snd_korg1212_ids[] = {
+static DEFINE_PCI_DEVICE_TABLE(snd_korg1212_ids) = {
 	{
 		.vendor	   = 0x10b5,
 		.device	   = 0x906d,
@@ -1238,7 +1238,8 @@ static struct snd_pcm_hardware snd_korg1212_playback_info =
 {
 	.info =              (SNDRV_PCM_INFO_MMAP |
                               SNDRV_PCM_INFO_MMAP_VALID |
-                              SNDRV_PCM_INFO_INTERLEAVED),
+			      SNDRV_PCM_INFO_INTERLEAVED |
+			      SNDRV_PCM_INFO_BATCH),
 	.formats =	      SNDRV_PCM_FMTBIT_S16_LE,
         .rates =              (SNDRV_PCM_RATE_44100 |
                               SNDRV_PCM_RATE_48000),
@@ -1258,7 +1259,8 @@ static struct snd_pcm_hardware snd_korg1212_capture_info =
 {
         .info =              (SNDRV_PCM_INFO_MMAP |
                               SNDRV_PCM_INFO_MMAP_VALID |
-                              SNDRV_PCM_INFO_INTERLEAVED),
+			      SNDRV_PCM_INFO_INTERLEAVED |
+			      SNDRV_PCM_INFO_BATCH),
         .formats =	      SNDRV_PCM_FMTBIT_S16_LE,
         .rates =	      (SNDRV_PCM_RATE_44100 |
                               SNDRV_PCM_RATE_48000),
@@ -2239,7 +2241,7 @@ static int __devinit snd_korg1212_create(struct snd_card *card, struct pci_dev *
 
         err = request_irq(pci->irq, snd_korg1212_interrupt,
                           IRQF_SHARED,
-                          "korg1212", korg1212);
+                          KBUILD_MODNAME, korg1212);
 
         if (err) {
 		snd_printk(KERN_ERR "korg1212: unable to grab IRQ %d\n", pci->irq);
@@ -2443,9 +2445,9 @@ snd_korg1212_probe(struct pci_dev *pci,
 		dev++;
 		return -ENOENT;
 	}
-	card = snd_card_new(index[dev], id[dev], THIS_MODULE, 0);
-        if (card == NULL)
-		return -ENOMEM;
+	err = snd_card_create(index[dev], id[dev], THIS_MODULE, 0, &card);
+	if (err < 0)
+		return err;
 
         if ((err = snd_korg1212_create(card, pci, &korg1212)) < 0) {
 		snd_card_free(card);
@@ -2475,7 +2477,7 @@ static void __devexit snd_korg1212_remove(struct pci_dev *pci)
 }
 
 static struct pci_driver driver = {
-	.name = "korg1212",
+	.name = KBUILD_MODNAME,
 	.id_table = snd_korg1212_ids,
 	.probe = snd_korg1212_probe,
 	.remove = __devexit_p(snd_korg1212_remove),

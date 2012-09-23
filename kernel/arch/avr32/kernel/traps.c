@@ -32,22 +32,25 @@ void NORET_TYPE die(const char *str, struct pt_regs *regs, long err)
 	spin_lock_irq(&die_lock);
 	bust_spinlocks(1);
 
-	printk(KERN_ALERT "Oops: %s, sig: %ld [#%d]\n" KERN_EMERG,
+	printk(KERN_ALERT "Oops: %s, sig: %ld [#%d]\n",
 	       str, err, ++die_counter);
+
+	printk(KERN_EMERG);
+
 #ifdef CONFIG_PREEMPT
-	printk("PREEMPT ");
+	printk(KERN_CONT "PREEMPT ");
 #endif
 #ifdef CONFIG_FRAME_POINTER
-	printk("FRAME_POINTER ");
+	printk(KERN_CONT "FRAME_POINTER ");
 #endif
 	if (current_cpu_data.features & AVR32_FEATURE_OCD) {
 		unsigned long did = ocd_read(DID);
-		printk("chip: 0x%03lx:0x%04lx rev %lu\n",
+		printk(KERN_CONT "chip: 0x%03lx:0x%04lx rev %lu\n",
 		       (did >> 1) & 0x7ff,
 		       (did >> 12) & 0x7fff,
 		       (did >> 28) & 0xf);
 	} else {
-		printk("cpu: arch %u r%u / core %u r%u\n",
+		printk(KERN_CONT "cpu: arch %u r%u / core %u r%u\n",
 		       current_cpu_data.arch_type,
 		       current_cpu_data.arch_revision,
 		       current_cpu_data.cpu_type,
@@ -75,36 +78,23 @@ void _exception(long signr, struct pt_regs *regs, int code,
 {
 	siginfo_t info;
 
-	if (!user_mode(regs))
+	if (!user_mode(regs)) {
+		const struct exception_table_entry *fixup;
+
+		/* Are we prepared to handle this kernel fault? */
+		fixup = search_exception_tables(regs->pc);
+		if (fixup) {
+			regs->pc = fixup->fixup;
+			return;
+		}
 		die("Unhandled exception in kernel mode", regs, signr);
+	}
 
 	memset(&info, 0, sizeof(info));
 	info.si_signo = signr;
 	info.si_code = code;
 	info.si_addr = (void __user *)addr;
 	force_sig_info(signr, &info, current);
-
-	/*
-	 * Init gets no signals that it doesn't have a handler for.
-	 * That's all very well, but if it has caused a synchronous
-	 * exception and we ignore the resulting signal, it will just
-	 * generate the same exception over and over again and we get
-	 * nowhere.  Better to kill it and let the kernel panic.
-	 */
-	if (is_global_init(current)) {
-		__sighandler_t handler;
-
-		spin_lock_irq(&current->sighand->siglock);
-		handler = current->sighand->action[signr-1].sa.sa_handler;
-		spin_unlock_irq(&current->sighand->siglock);
-		if (handler == SIG_DFL) {
-			/* init has generated a synchronous exception
-			   and it doesn't have a handler for the signal */
-			printk(KERN_CRIT "init has generated signal %ld "
-			       "but has no handler for it\n", signr);
-			do_exit(signr);
-		}
-	}
 }
 
 asmlinkage void do_nmi(unsigned long ecr, struct pt_regs *regs)

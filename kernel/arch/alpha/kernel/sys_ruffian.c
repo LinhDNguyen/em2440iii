@@ -14,6 +14,7 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
+#include <linux/timex.h>
 #include <linux/init.h>
 
 #include <asm/ptrace.h>
@@ -25,7 +26,6 @@
 #include <asm/pgtable.h>
 #include <asm/core_cia.h>
 #include <asm/tlbflush.h>
-#include <asm/8253pit.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -65,7 +65,7 @@ ruffian_init_irq(void)
 	common_init_isa_dma();
 }
 
-#define RUFFIAN_LATCH	((PIT_TICK_RATE + HZ / 2) / HZ)
+#define RUFFIAN_LATCH	DIV_ROUND_CLOSEST(PIT_TICK_RATE, HZ)
 
 static void __init
 ruffian_init_rtc(void)
@@ -119,7 +119,7 @@ ruffian_kill_arch (int mode)
  */
 
 static int __init
-ruffian_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+ruffian_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
         static char irq_tab[11][5] __initdata = {
 	      /*INT  INTA INTB INTC INTD */

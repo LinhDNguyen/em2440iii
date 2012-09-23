@@ -35,6 +35,7 @@
 #include <linux/vmalloc.h>
 #include <linux/init.h>
 #include <linux/mutex.h>
+#include <linux/moduleparam.h>
 
 #include <sound/core.h>
 #include <sound/tlv.h>
@@ -49,6 +50,10 @@
 #if 0		/* for testing purposes - feed the front signal to Center/LFE outputs */
 #define EMU10K1_CENTER_LFE_FROM_FRONT
 #endif
+
+static bool high_res_gpr_volume;
+module_param(high_res_gpr_volume, bool, 0444);
+MODULE_PARM_DESC(high_res_gpr_volume, "GPR mixer controls use 31-bit range.");
 
 /*
  *  Tables
@@ -296,6 +301,10 @@ static const u32 db_table[101] = {
 
 /* EMU10k1/EMU10k2 DSP control db gain */
 static const DECLARE_TLV_DB_SCALE(snd_emu10k1_db_scale1, -4000, 40, 1);
+static const DECLARE_TLV_DB_LINEAR(snd_emu10k1_db_linear, TLV_DB_GAIN_MUTE, 0);
+
+/* EMU10K1 bass/treble db gain */
+static const DECLARE_TLV_DB_SCALE(snd_emu10k1_bass_treble_db_scale, -1200, 60, 0);
 
 static const u32 onoff_table[2] = {
 	0x00000000, 0x00000001
@@ -1072,10 +1081,17 @@ snd_emu10k1_init_mono_control(struct snd_emu10k1_fx8010_control_gpr *ctl,
 	strcpy(ctl->id.name, name);
 	ctl->vcount = ctl->count = 1;
 	ctl->gpr[0] = gpr + 0; ctl->value[0] = defval;
-	ctl->min = 0;
-	ctl->max = 100;
-	ctl->tlv = snd_emu10k1_db_scale1;
-	ctl->translation = EMU10K1_GPR_TRANSLATION_TABLE100;	
+	if (high_res_gpr_volume) {
+		ctl->min = 0;
+		ctl->max = 0x7fffffff;
+		ctl->tlv = snd_emu10k1_db_linear;
+		ctl->translation = EMU10K1_GPR_TRANSLATION_NONE;
+	} else {
+		ctl->min = 0;
+		ctl->max = 100;
+		ctl->tlv = snd_emu10k1_db_scale1;
+		ctl->translation = EMU10K1_GPR_TRANSLATION_TABLE100;
+	}
 }
 
 static void __devinit
@@ -1087,10 +1103,17 @@ snd_emu10k1_init_stereo_control(struct snd_emu10k1_fx8010_control_gpr *ctl,
 	ctl->vcount = ctl->count = 2;
 	ctl->gpr[0] = gpr + 0; ctl->value[0] = defval;
 	ctl->gpr[1] = gpr + 1; ctl->value[1] = defval;
-	ctl->min = 0;
-	ctl->max = 100;
-	ctl->tlv = snd_emu10k1_db_scale1;
-	ctl->translation = EMU10K1_GPR_TRANSLATION_TABLE100;
+	if (high_res_gpr_volume) {
+		ctl->min = 0;
+		ctl->max = 0x7fffffff;
+		ctl->tlv = snd_emu10k1_db_linear;
+		ctl->translation = EMU10K1_GPR_TRANSLATION_NONE;
+	} else {
+		ctl->min = 0;
+		ctl->max = 100;
+		ctl->tlv = snd_emu10k1_db_scale1;
+		ctl->translation = EMU10K1_GPR_TRANSLATION_TABLE100;
+	}
 }
 
 static void __devinit
@@ -1519,7 +1542,7 @@ A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 	/* A_PUT_STEREO_OUTPUT(A_EXTOUT_FRONT_L, A_EXTOUT_FRONT_R, playback + SND_EMU10K1_PLAYBACK_CHANNELS); */
 	if (emu->card_capabilities->emu_model) {
 		/* EMU1010 Outputs from PCM Front, Rear, Center, LFE, Side */
-		snd_printk("EMU outputs on\n");
+		snd_printk(KERN_INFO "EMU outputs on\n");
 		for (z = 0; z < 8; z++) {
 			if (emu->card_capabilities->ca0108_chip) {
 				A_OP(icode, &ptr, iACC3, A3_EMU32OUT(z), A_GPR(playback + SND_EMU10K1_PLAYBACK_CHANNELS + z), A_C_00000000, A_C_00000000);
@@ -1567,7 +1590,7 @@ A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 
 	if (emu->card_capabilities->emu_model) {
 		if (emu->card_capabilities->ca0108_chip) {
-			snd_printk("EMU2 inputs on\n");
+			snd_printk(KERN_INFO "EMU2 inputs on\n");
 			for (z = 0; z < 0x10; z++) {
 				snd_emu10k1_audigy_dsp_convert_32_to_2x16( icode, &ptr, tmp, 
 									bit_shifter16,
@@ -1575,10 +1598,13 @@ A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 									A_FXBUS2(z*2) );
 			}
 		} else {
-			snd_printk("EMU inputs on\n");
+			snd_printk(KERN_INFO "EMU inputs on\n");
 			/* Capture 16 (originally 8) channels of S32_LE sound */
 
-			/* printk("emufx.c: gpr=0x%x, tmp=0x%x\n",gpr, tmp); */
+			/*
+			printk(KERN_DEBUG "emufx.c: gpr=0x%x, tmp=0x%x\n",
+			       gpr, tmp);
+			*/
 			/* For the EMU1010: How to get 32bit values from the DSP. High 16bits into L, low 16bits into R. */
 			/* A_P16VIN(0) is delayed by one sample,
 			 * so all other A_P16VIN channels will need to also be delayed
@@ -2140,6 +2166,7 @@ static int __devinit _snd_emu10k1_init_efx(struct snd_emu10k1 *emu)
 	ctl->min = 0;
 	ctl->max = 40;
 	ctl->value[0] = ctl->value[1] = 20;
+	ctl->tlv = snd_emu10k1_bass_treble_db_scale;
 	ctl->translation = EMU10K1_GPR_TRANSLATION_BASS;
 	ctl = &controls[i + 1];
 	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
@@ -2149,6 +2176,7 @@ static int __devinit _snd_emu10k1_init_efx(struct snd_emu10k1 *emu)
 	ctl->min = 0;
 	ctl->max = 40;
 	ctl->value[0] = ctl->value[1] = 20;
+	ctl->tlv = snd_emu10k1_bass_treble_db_scale;
 	ctl->translation = EMU10K1_GPR_TRANSLATION_TREBLE;
 
 #define BASS_GPR	0x8c
@@ -2490,24 +2518,17 @@ static int snd_emu10k1_fx8010_ioctl(struct snd_hwdep * hw, struct file *file, un
 	case SNDRV_EMU10K1_IOCTL_CODE_POKE:
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
-		icode = kmalloc(sizeof(*icode), GFP_KERNEL);
-		if (icode == NULL)
-			return -ENOMEM;
-		if (copy_from_user(icode, argp, sizeof(*icode))) {
-			kfree(icode);
-			return -EFAULT;
-		}
+
+		icode = memdup_user(argp, sizeof(*icode));
+		if (IS_ERR(icode))
+			return PTR_ERR(icode);
 		res = snd_emu10k1_icode_poke(emu, icode);
 		kfree(icode);
 		return res;
 	case SNDRV_EMU10K1_IOCTL_CODE_PEEK:
-		icode = kmalloc(sizeof(*icode), GFP_KERNEL);
-		if (icode == NULL)
-			return -ENOMEM;
-		if (copy_from_user(icode, argp, sizeof(*icode))) {
-			kfree(icode);
-			return -EFAULT;
-		}
+		icode = memdup_user(argp, sizeof(*icode));
+		if (IS_ERR(icode))
+			return PTR_ERR(icode);
 		res = snd_emu10k1_icode_peek(emu, icode);
 		if (res == 0 && copy_to_user(argp, icode, sizeof(*icode))) {
 			kfree(icode);
@@ -2516,24 +2537,16 @@ static int snd_emu10k1_fx8010_ioctl(struct snd_hwdep * hw, struct file *file, un
 		kfree(icode);
 		return res;
 	case SNDRV_EMU10K1_IOCTL_PCM_POKE:
-		ipcm = kmalloc(sizeof(*ipcm), GFP_KERNEL);
-		if (ipcm == NULL)
-			return -ENOMEM;
-		if (copy_from_user(ipcm, argp, sizeof(*ipcm))) {
-			kfree(ipcm);
-			return -EFAULT;
-		}
+		ipcm = memdup_user(argp, sizeof(*ipcm));
+		if (IS_ERR(ipcm))
+			return PTR_ERR(ipcm);
 		res = snd_emu10k1_ipcm_poke(emu, ipcm);
 		kfree(ipcm);
 		return res;
 	case SNDRV_EMU10K1_IOCTL_PCM_PEEK:
-		ipcm = kzalloc(sizeof(*ipcm), GFP_KERNEL);
-		if (ipcm == NULL)
-			return -ENOMEM;
-		if (copy_from_user(ipcm, argp, sizeof(*ipcm))) {
-			kfree(ipcm);
-			return -EFAULT;
-		}
+		ipcm = memdup_user(argp, sizeof(*ipcm));
+		if (IS_ERR(ipcm))
+			return PTR_ERR(ipcm);
 		res = snd_emu10k1_ipcm_peek(emu, ipcm);
 		if (res == 0 && copy_to_user(argp, ipcm, sizeof(*ipcm))) {
 			kfree(ipcm);

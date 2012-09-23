@@ -102,7 +102,7 @@ static int __init smsc_superio_setup(void)
 {
 	unsigned char devid, devrev;
 
-	smsc_superio_virt = onchip_remap(SMSC_SUPERIO_BASE, 1024, "SMSC SuperIO");
+	smsc_superio_virt = (unsigned long)ioremap_nocache(SMSC_SUPERIO_BASE, 1024);
 	if (!smsc_superio_virt) {
 		panic("Unable to remap SMSC SuperIO\n");
 	}
@@ -165,7 +165,7 @@ static int __init smsc_superio_setup(void)
 
 	return 0;
 }
-__initcall(smsc_superio_setup);
+device_initcall(smsc_superio_setup);
 
 static void __iomem *cayman_ioport_map(unsigned long port, unsigned int len)
 {

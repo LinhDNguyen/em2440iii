@@ -42,6 +42,8 @@
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -58,6 +60,7 @@
 #include <linux/kfifo.h>
 #include <linux/workqueue.h>
 #include <linux/acpi.h>
+#include <linux/slab.h>
 #include <acpi/acpi_drivers.h>
 #include <acpi/acpi_bus.h>
 #include <asm/uaccess.h>
@@ -69,9 +72,10 @@
 #include <linux/miscdevice.h>
 #endif
 
-#define DRV_PFX			"sony-laptop: "
-#define dprintk(msg...)		do {			\
-	if (debug) printk(KERN_WARNING DRV_PFX  msg);	\
+#define dprintk(fmt, ...)			\
+do {						\
+	if (debug)				\
+		pr_warn(fmt, ##__VA_ARGS__);	\
 } while (0)
 
 #define SONY_LAPTOP_DRIVER_VERSION	"0.6"
@@ -123,16 +127,32 @@ MODULE_PARM_DESC(minor,
 		 "default is -1 (automatic)");
 #endif
 
+static int kbd_backlight;	/* = 1 */
+module_param(kbd_backlight, int, 0444);
+MODULE_PARM_DESC(kbd_backlight,
+		 "set this to 0 to disable keyboard backlight, "
+		 "1 to enable it (default: 0)");
+
+static int kbd_backlight_timeout;	/* = 0 */
+module_param(kbd_backlight_timeout, int, 0444);
+MODULE_PARM_DESC(kbd_backlight_timeout,
+		 "set this to 0 to set the default 10 seconds timeout, "
+		 "1 for 30 seconds, 2 for 60 seconds and 3 to disable timeout "
+		 "(default: 0)");
+
+static void sony_nc_kbd_backlight_resume(void);
+
 enum sony_nc_rfkill {
 	SONY_WIFI,
 	SONY_BLUETOOTH,
 	SONY_WWAN,
 	SONY_WIMAX,
-	SONY_RFKILL_MAX,
+	N_SONY_RFKILL,
 };
 
-static struct rfkill *sony_rfkill_devices[SONY_RFKILL_MAX];
-static int sony_rfkill_address[SONY_RFKILL_MAX] = {0x300, 0x500, 0x700, 0x900};
+static int sony_rfkill_handle;
+static struct rfkill *sony_rfkill_devices[N_SONY_RFKILL];
+static int sony_rfkill_address[N_SONY_RFKILL] = {0x300, 0x500, 0x700, 0x900};
 static void sony_nc_rfkill_update(void);
 
 /*********** Input Devices ***********/
@@ -142,9 +162,9 @@ struct sony_laptop_input_s {
 	atomic_t		users;
 	struct input_dev	*jog_dev;
 	struct input_dev	*key_dev;
-	struct kfifo		*fifo;
+	struct kfifo		fifo;
 	spinlock_t		fifo_lock;
-	struct workqueue_struct	*wq;
+	struct timer_list	release_key_timer;
 };
 
 static struct sony_laptop_input_s sony_laptop_input = {
@@ -232,6 +252,8 @@ static int sony_laptop_input_index[] = {
 	56,	/* 69 SONYPI_EVENT_VOLUME_INC_PRESSED */
 	57,	/* 70 SONYPI_EVENT_VOLUME_DEC_PRESSED */
 	-1,	/* 71 SONYPI_EVENT_BRIGHTNESS_PRESSED */
+	58,	/* 72 SONYPI_EVENT_MEDIA_PRESSED */
+	59,	/* 72 SONYPI_EVENT_VENDOR_PRESSED */
 };
 
 static int sony_laptop_input_keycode_map[] = {
@@ -293,22 +315,31 @@ static int sony_laptop_input_keycode_map[] = {
 	KEY_F15,	/* 55 SONYPI_EVENT_SETTINGKEY_PRESSED */
 	KEY_VOLUMEUP,	/* 56 SONYPI_EVENT_VOLUME_INC_PRESSED */
 	KEY_VOLUMEDOWN,	/* 57 SONYPI_EVENT_VOLUME_DEC_PRESSED */
+	KEY_MEDIA,	/* 58 SONYPI_EVENT_MEDIA_PRESSED */
+	KEY_VENDOR,	/* 59 SONYPI_EVENT_VENDOR_PRESSED */
 };
 
 /* release buttons after a short delay if pressed */
-static void do_sony_laptop_release_key(struct work_struct *work)
+static void do_sony_laptop_release_key(unsigned long unused)
 {
 	struct sony_laptop_keypress kp;
+	unsigned long flags;
 
-	while (kfifo_get(sony_laptop_input.fifo, (unsigned char *)&kp,
-			 sizeof(kp)) == sizeof(kp)) {
-		msleep(10);
+	spin_lock_irqsave(&sony_laptop_input.fifo_lock, flags);
+
+	if (kfifo_out(&sony_laptop_input.fifo,
+		      (unsigned char *)&kp, sizeof(kp)) == sizeof(kp)) {
 		input_report_key(kp.dev, kp.key, 0);
 		input_sync(kp.dev);
 	}
+
+	/* If there is something in the fifo schedule next release. */
+	if (kfifo_len(&sony_laptop_input.fifo) != 0)
+		mod_timer(&sony_laptop_input.release_key_timer,
+			  jiffies + msecs_to_jiffies(10));
+
+	spin_unlock_irqrestore(&sony_laptop_input.fifo_lock, flags);
 }
-static DECLARE_WORK(sony_laptop_release_key_work,
-		do_sony_laptop_release_key);
 
 /* forward event to the input subsystem */
 static void sony_laptop_report_input_event(u8 event)
@@ -362,12 +393,13 @@ static void sony_laptop_report_input_event(u8 event)
 		/* we emit the scancode so we can always remap the key */
 		input_event(kp.dev, EV_MSC, MSC_SCAN, event);
 		input_sync(kp.dev);
-		kfifo_put(sony_laptop_input.fifo,
-			  (unsigned char *)&kp, sizeof(kp));
 
-		if (!work_pending(&sony_laptop_release_key_work))
-			queue_work(sony_laptop_input.wq,
-					&sony_laptop_release_key_work);
+		/* schedule key release */
+		kfifo_in_locked(&sony_laptop_input.fifo,
+				(unsigned char *)&kp, sizeof(kp),
+				&sony_laptop_input.fifo_lock);
+		mod_timer(&sony_laptop_input.release_key_timer,
+			  jiffies + msecs_to_jiffies(10));
 	} else
 		dprintk("unknown input event %.2x\n", event);
 }
@@ -385,29 +417,21 @@ static int sony_laptop_setup_input(struct acpi_device *acpi_device)
 
 	/* kfifo */
 	spin_lock_init(&sony_laptop_input.fifo_lock);
-	sony_laptop_input.fifo =
-		kfifo_alloc(SONY_LAPTOP_BUF_SIZE, GFP_KERNEL,
-			    &sony_laptop_input.fifo_lock);
-	if (IS_ERR(sony_laptop_input.fifo)) {
-		printk(KERN_ERR DRV_PFX "kfifo_alloc failed\n");
-		error = PTR_ERR(sony_laptop_input.fifo);
+	error = kfifo_alloc(&sony_laptop_input.fifo,
+			    SONY_LAPTOP_BUF_SIZE, GFP_KERNEL);
+	if (error) {
+		pr_err("kfifo_alloc failed\n");
 		goto err_dec_users;
 	}
 
-	/* init workqueue */
-	sony_laptop_input.wq = create_singlethread_workqueue("sony-laptop");
-	if (!sony_laptop_input.wq) {
-		printk(KERN_ERR DRV_PFX
-				"Unable to create workqueue.\n");
-		error = -ENXIO;
-		goto err_free_kfifo;
-	}
+	setup_timer(&sony_laptop_input.release_key_timer,
+		    do_sony_laptop_release_key, 0);
 
 	/* input keys */
 	key_dev = input_allocate_device();
 	if (!key_dev) {
 		error = -ENOMEM;
-		goto err_destroy_wq;
+		goto err_free_kfifo;
 	}
 
 	key_dev->name = "Sony Vaio Keys";
@@ -416,18 +440,15 @@ static int sony_laptop_setup_input(struct acpi_device *acpi_device)
 	key_dev->dev.parent = &acpi_device->dev;
 
 	/* Initialize the Input Drivers: special keys */
-	set_bit(EV_KEY, key_dev->evbit);
-	set_bit(EV_MSC, key_dev->evbit);
-	set_bit(MSC_SCAN, key_dev->mscbit);
+	input_set_capability(key_dev, EV_MSC, MSC_SCAN);
+
+	__set_bit(EV_KEY, key_dev->evbit);
 	key_dev->keycodesize = sizeof(sony_laptop_input_keycode_map[0]);
 	key_dev->keycodemax = ARRAY_SIZE(sony_laptop_input_keycode_map);
 	key_dev->keycode = &sony_laptop_input_keycode_map;
-	for (i = 0; i < ARRAY_SIZE(sony_laptop_input_keycode_map); i++) {
-		if (sony_laptop_input_keycode_map[i] != KEY_RESERVED) {
-			set_bit(sony_laptop_input_keycode_map[i],
-				key_dev->keybit);
-		}
-	}
+	for (i = 0; i < ARRAY_SIZE(sony_laptop_input_keycode_map); i++)
+		__set_bit(sony_laptop_input_keycode_map[i], key_dev->keybit);
+	__clear_bit(KEY_RESERVED, key_dev->keybit);
 
 	error = input_register_device(key_dev);
 	if (error)
@@ -447,9 +468,8 @@ static int sony_laptop_setup_input(struct acpi_device *acpi_device)
 	jog_dev->id.vendor = PCI_VENDOR_ID_SONY;
 	key_dev->dev.parent = &acpi_device->dev;
 
-	jog_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REL);
-	jog_dev->keybit[BIT_WORD(BTN_MOUSE)] = BIT_MASK(BTN_MIDDLE);
-	jog_dev->relbit[0] = BIT_MASK(REL_WHEEL);
+	input_set_capability(jog_dev, EV_KEY, BTN_MIDDLE);
+	input_set_capability(jog_dev, EV_REL, REL_WHEEL);
 
 	error = input_register_device(jog_dev);
 	if (error)
@@ -470,11 +490,8 @@ err_unregister_keydev:
 err_free_keydev:
 	input_free_device(key_dev);
 
-err_destroy_wq:
-	destroy_workqueue(sony_laptop_input.wq);
-
 err_free_kfifo:
-	kfifo_free(sony_laptop_input.fifo);
+	kfifo_free(&sony_laptop_input.fifo);
 
 err_dec_users:
 	atomic_dec(&sony_laptop_input.users);
@@ -483,12 +500,23 @@ err_dec_users:
 
 static void sony_laptop_remove_input(void)
 {
-	/* cleanup only after the last user has gone */
+	struct sony_laptop_keypress kp = { NULL };
+
+	/* Cleanup only after the last user has gone */
 	if (!atomic_dec_and_test(&sony_laptop_input.users))
 		return;
 
-	/* flush workqueue first */
-	flush_workqueue(sony_laptop_input.wq);
+	del_timer_sync(&sony_laptop_input.release_key_timer);
+
+	/*
+	 * Generate key-up events for remaining keys. Note that we don't
+	 * need locking since nobody is adding new events to the kfifo.
+	 */
+	while (kfifo_out(&sony_laptop_input.fifo,
+			 (unsigned char *)&kp, sizeof(kp)) == sizeof(kp)) {
+		input_report_key(kp.dev, kp.key, 0);
+		input_sync(kp.dev);
+	}
 
 	/* destroy input devs */
 	input_unregister_device(sony_laptop_input.key_dev);
@@ -499,8 +527,7 @@ static void sony_laptop_remove_input(void)
 		sony_laptop_input.jog_dev = NULL;
 	}
 
-	destroy_workqueue(sony_laptop_input.wq);
-	kfifo_free(sony_laptop_input.fifo);
+	kfifo_free(&sony_laptop_input.fifo);
 }
 
 /*********** Platform Device ***********/
@@ -554,8 +581,7 @@ static void sony_pf_remove(void)
 	if (!atomic_dec_and_test(&sony_pf_users))
 		return;
 
-	platform_device_del(sony_pf_device);
-	platform_device_put(sony_pf_device);
+	platform_device_unregister(sony_pf_device);
 	platform_driver_unregister(&sony_pf_driver);
 }
 
@@ -583,7 +609,7 @@ struct sony_nc_value {
 	int value;		/* current setting */
 	int valid;		/* Has ever been set */
 	int debug;		/* active only in debug mode ? */
-	struct device_attribute devattr;	/* sysfs atribute */
+	struct device_attribute devattr;	/* sysfs attribute */
 };
 
 #define SNC_HANDLE_NAMES(_name, _values...) \
@@ -678,7 +704,7 @@ static int acpi_callgetfunc(acpi_handle handle, char *name, int *result)
 		return 0;
 	}
 
-	printk(KERN_WARNING DRV_PFX "acpi_callreadfunc failed\n");
+	pr_warn("acpi_callreadfunc failed\n");
 
 	return -1;
 }
@@ -704,8 +730,7 @@ static int acpi_callsetfunc(acpi_handle handle, char *name, int value,
 	if (status == AE_OK) {
 		if (result != NULL) {
 			if (out_obj.type != ACPI_TYPE_INTEGER) {
-				printk(KERN_WARNING DRV_PFX "acpi_evaluate_object bad "
-				       "return type\n");
+				pr_warn("acpi_evaluate_object bad return type\n");
 				return -1;
 			}
 			*result = out_obj.integer.value;
@@ -713,34 +738,111 @@ static int acpi_callsetfunc(acpi_handle handle, char *name, int value,
 		return 0;
 	}
 
-	printk(KERN_WARNING DRV_PFX "acpi_evaluate_object failed\n");
+	pr_warn("acpi_evaluate_object failed\n");
 
 	return -1;
+}
+
+struct sony_nc_handles {
+	u16 cap[0x10];
+	struct device_attribute devattr;
+};
+
+static struct sony_nc_handles *handles;
+
+static ssize_t sony_nc_handles_show(struct device *dev,
+		struct device_attribute *attr, char *buffer)
+{
+	ssize_t len = 0;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(handles->cap); i++) {
+		len += snprintf(buffer + len, PAGE_SIZE - len, "0x%.4x ",
+				handles->cap[i]);
+	}
+	len += snprintf(buffer + len, PAGE_SIZE - len, "\n");
+
+	return len;
+}
+
+static int sony_nc_handles_setup(struct platform_device *pd)
+{
+	int i;
+	int result;
+
+	handles = kzalloc(sizeof(*handles), GFP_KERNEL);
+	if (!handles)
+		return -ENOMEM;
+
+	for (i = 0; i < ARRAY_SIZE(handles->cap); i++) {
+		if (!acpi_callsetfunc(sony_nc_acpi_handle,
+					"SN00", i + 0x20, &result)) {
+			dprintk("caching handle 0x%.4x (offset: 0x%.2x)\n",
+					result, i);
+			handles->cap[i] = result;
+		}
+	}
+
+	if (debug) {
+		sysfs_attr_init(&handles->devattr.attr);
+		handles->devattr.attr.name = "handles";
+		handles->devattr.attr.mode = S_IRUGO;
+		handles->devattr.show = sony_nc_handles_show;
+
+		/* allow reading capabilities via sysfs */
+		if (device_create_file(&pd->dev, &handles->devattr)) {
+			kfree(handles);
+			handles = NULL;
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int sony_nc_handles_cleanup(struct platform_device *pd)
+{
+	if (handles) {
+		if (debug)
+			device_remove_file(&pd->dev, &handles->devattr);
+		kfree(handles);
+		handles = NULL;
+	}
+	return 0;
 }
 
 static int sony_find_snc_handle(int handle)
 {
 	int i;
-	int result;
 
-	for (i = 0x20; i < 0x30; i++) {
-		acpi_callsetfunc(sony_nc_acpi_handle, "SN00", i, &result);
-		if (result == handle)
-			return i-0x20;
+	/* not initialized yet, return early */
+	if (!handles)
+		return -1;
+
+	for (i = 0; i < 0x10; i++) {
+		if (handles->cap[i] == handle) {
+			dprintk("found handle 0x%.4x (offset: 0x%.2x)\n",
+					handle, i);
+			return i;
+		}
 	}
-
+	dprintk("handle 0x%.4x not found\n", handle);
 	return -1;
 }
 
 static int sony_call_snc_handle(int handle, int argument, int *result)
 {
+	int ret = 0;
 	int offset = sony_find_snc_handle(handle);
 
 	if (offset < 0)
 		return -1;
 
-	return acpi_callsetfunc(sony_nc_acpi_handle, "SN07", offset | argument,
-				result);
+	ret = acpi_callsetfunc(sony_nc_acpi_handle, "SN07", offset | argument,
+			result);
+	dprintk("called SN07 with 0x%.4x (result: 0x%.4x)\n", offset | argument,
+			*result);
+	return ret;
 }
 
 /*
@@ -833,6 +935,14 @@ static ssize_t sony_nc_sysfs_store(struct device *dev,
 /*
  * Backlight device
  */
+struct sony_backlight_props {
+	struct backlight_device *dev;
+	int			handle;
+	u8			offset;
+	u8			maxlvl;
+};
+struct sony_backlight_props sony_bl_props;
+
 static int sony_backlight_update_status(struct backlight_device *bd)
 {
 	return acpi_callsetfunc(sony_nc_acpi_handle, "SBRT",
@@ -849,10 +959,39 @@ static int sony_backlight_get_brightness(struct backlight_device *bd)
 	return value - 1;
 }
 
-static struct backlight_device *sony_backlight_device;
-static struct backlight_ops sony_backlight_ops = {
+static int sony_nc_get_brightness_ng(struct backlight_device *bd)
+{
+	int result;
+	struct sony_backlight_props *sdev =
+		(struct sony_backlight_props *)bl_get_data(bd);
+
+	sony_call_snc_handle(sdev->handle, 0x0200, &result);
+
+	return (result & 0xff) - sdev->offset;
+}
+
+static int sony_nc_update_status_ng(struct backlight_device *bd)
+{
+	int value, result;
+	struct sony_backlight_props *sdev =
+		(struct sony_backlight_props *)bl_get_data(bd);
+
+	value = bd->props.brightness + sdev->offset;
+	if (sony_call_snc_handle(sdev->handle, 0x0100 | (value << 16), &result))
+		return -EIO;
+
+	return value;
+}
+
+static const struct backlight_ops sony_backlight_ops = {
+	.options = BL_CORE_SUSPENDRESUME,
 	.update_status = sony_backlight_update_status,
 	.get_brightness = sony_backlight_get_brightness,
+};
+static const struct backlight_ops sony_backlight_ng_ops = {
+	.options = BL_CORE_SUSPENDRESUME,
+	.update_status = sony_nc_update_status_ng,
+	.get_brightness = sony_nc_get_brightness_ng,
 };
 
 /*
@@ -888,8 +1027,18 @@ static struct sony_nc_event sony_100_events[] = {
 	{ 0x0A, SONYPI_EVENT_FNKEY_RELEASED },
 	{ 0x8C, SONYPI_EVENT_FNKEY_F12 },
 	{ 0x0C, SONYPI_EVENT_FNKEY_RELEASED },
+	{ 0x9d, SONYPI_EVENT_ZOOM_PRESSED },
+	{ 0x1d, SONYPI_EVENT_ANYBUTTON_RELEASED },
 	{ 0x9f, SONYPI_EVENT_CD_EJECT_PRESSED },
 	{ 0x1f, SONYPI_EVENT_ANYBUTTON_RELEASED },
+	{ 0xa1, SONYPI_EVENT_MEDIA_PRESSED },
+	{ 0x21, SONYPI_EVENT_ANYBUTTON_RELEASED },
+	{ 0xa4, SONYPI_EVENT_CD_EJECT_PRESSED },
+	{ 0x24, SONYPI_EVENT_ANYBUTTON_RELEASED },
+	{ 0xa5, SONYPI_EVENT_VENDOR_PRESSED },
+	{ 0x25, SONYPI_EVENT_ANYBUTTON_RELEASED },
+	{ 0xa6, SONYPI_EVENT_HELP_PRESSED },
+	{ 0x26, SONYPI_EVENT_ANYBUTTON_RELEASED },
 	{ 0, 0 },
 };
 
@@ -954,14 +1103,12 @@ static void sony_nc_notify(struct acpi_device *device, u32 event)
 				}
 
 				if (!key_event->data)
-					printk(KERN_INFO DRV_PFX
-							"Unknown event: 0x%x 0x%x\n",
-							key_handle,
-							ev);
+					pr_info("Unknown event: 0x%x 0x%x\n",
+						key_handle, ev);
 				else
 					sony_laptop_report_input_event(ev);
 			}
-		} else if (sony_find_snc_handle(0x124) == ev) {
+		} else if (sony_find_snc_handle(sony_rfkill_handle) == ev) {
 			sony_nc_rfkill_update();
 			return;
 		}
@@ -976,15 +1123,12 @@ static acpi_status sony_walk_callback(acpi_handle handle, u32 level,
 				      void *context, void **return_value)
 {
 	struct acpi_device_info *info;
-	struct acpi_buffer buffer = {ACPI_ALLOCATE_BUFFER, NULL};
 
-	if (ACPI_SUCCESS(acpi_get_object_info(handle, &buffer))) {
-		info = buffer.pointer;
-
-		printk(KERN_WARNING DRV_PFX "method: name: %4.4s, args %X\n",
+	if (ACPI_SUCCESS(acpi_get_object_info(handle, &info))) {
+		pr_warn("method: name: %4.4s, args %X\n",
 			(char *)&info->name, info->param_count);
 
-		kfree(buffer.pointer);
+		kfree(info);
 	}
 
 	return AE_OK;
@@ -1022,7 +1166,7 @@ static int sony_nc_resume(struct acpi_device *device)
 		ret = acpi_callsetfunc(sony_nc_acpi_handle, *item->acpiset,
 				       item->value, NULL);
 		if (ret < 0) {
-			printk("%s: %d\n", __func__, ret);
+			pr_err("%s: %d\n", __func__, ret);
 			break;
 		}
 	}
@@ -1039,10 +1183,11 @@ static int sony_nc_resume(struct acpi_device *device)
 		sony_nc_function_setup(device);
 	}
 
-	/* set the last requested brightness level */
-	if (sony_backlight_device &&
-			sony_backlight_update_status(sony_backlight_device) < 0)
-		printk(KERN_WARNING DRV_PFX "unable to restore brightness level\n");
+	/* re-read rfkill state */
+	sony_nc_rfkill_update();
+
+	/* restore kbd backlight states */
+	sony_nc_kbd_backlight_resume();
 
 	return 0;
 }
@@ -1051,178 +1196,480 @@ static void sony_nc_rfkill_cleanup(void)
 {
 	int i;
 
-	for (i = 0; i < SONY_RFKILL_MAX; i++) {
-		if (sony_rfkill_devices[i])
-			rfkill_unregister(sony_rfkill_devices[i]);
-	}
-}
-
-static int sony_nc_rfkill_get(void *data, enum rfkill_state *state)
-{
-	int result;
-	int argument = sony_rfkill_address[(long) data];
-
-	sony_call_snc_handle(0x124, 0x200, &result);
-	if (result & 0x1) {
-		sony_call_snc_handle(0x124, argument, &result);
-		if (result & 0xf)
-			*state = RFKILL_STATE_UNBLOCKED;
-		else
-			*state = RFKILL_STATE_SOFT_BLOCKED;
-	} else {
-		*state = RFKILL_STATE_HARD_BLOCKED;
-	}
-
-	return 0;
-}
-
-static int sony_nc_rfkill_set(void *data, enum rfkill_state state)
-{
-	int result;
-	int argument = sony_rfkill_address[(long) data] + 0x100;
-
-	if (state == RFKILL_STATE_UNBLOCKED)
-		argument |= 0xff0000;
-
-	return sony_call_snc_handle(0x124, argument, &result);
-}
-
-static int sony_nc_setup_wifi_rfkill(struct acpi_device *device)
-{
-	int err = 0;
-	struct rfkill *sony_wifi_rfkill;
-
-	sony_wifi_rfkill = rfkill_allocate(&device->dev, RFKILL_TYPE_WLAN);
-	if (!sony_wifi_rfkill)
-		return -1;
-	sony_wifi_rfkill->name = "sony-wifi";
-	sony_wifi_rfkill->toggle_radio = sony_nc_rfkill_set;
-	sony_wifi_rfkill->get_state = sony_nc_rfkill_get;
-	sony_wifi_rfkill->user_claim_unsupported = 1;
-	sony_wifi_rfkill->data = (void *)SONY_WIFI;
-	err = rfkill_register(sony_wifi_rfkill);
-	if (err)
-		rfkill_free(sony_wifi_rfkill);
-	else {
-		sony_rfkill_devices[SONY_WIFI] = sony_wifi_rfkill;
-		sony_nc_rfkill_set(sony_wifi_rfkill->data,
-				RFKILL_STATE_UNBLOCKED);
-	}
-	return err;
-}
-
-static int sony_nc_setup_bluetooth_rfkill(struct acpi_device *device)
-{
-	int err = 0;
-	struct rfkill *sony_bluetooth_rfkill;
-
-	sony_bluetooth_rfkill = rfkill_allocate(&device->dev,
-						RFKILL_TYPE_BLUETOOTH);
-	if (!sony_bluetooth_rfkill)
-		return -1;
-	sony_bluetooth_rfkill->name = "sony-bluetooth";
-	sony_bluetooth_rfkill->toggle_radio = sony_nc_rfkill_set;
-	sony_bluetooth_rfkill->get_state = sony_nc_rfkill_get;
-	sony_bluetooth_rfkill->user_claim_unsupported = 1;
-	sony_bluetooth_rfkill->data = (void *)SONY_BLUETOOTH;
-	err = rfkill_register(sony_bluetooth_rfkill);
-	if (err)
-		rfkill_free(sony_bluetooth_rfkill);
-	else {
-		sony_rfkill_devices[SONY_BLUETOOTH] = sony_bluetooth_rfkill;
-		sony_nc_rfkill_set(sony_bluetooth_rfkill->data,
-				RFKILL_STATE_UNBLOCKED);
-	}
-	return err;
-}
-
-static int sony_nc_setup_wwan_rfkill(struct acpi_device *device)
-{
-	int err = 0;
-	struct rfkill *sony_wwan_rfkill;
-
-	sony_wwan_rfkill = rfkill_allocate(&device->dev, RFKILL_TYPE_WWAN);
-	if (!sony_wwan_rfkill)
-		return -1;
-	sony_wwan_rfkill->name = "sony-wwan";
-	sony_wwan_rfkill->toggle_radio = sony_nc_rfkill_set;
-	sony_wwan_rfkill->get_state = sony_nc_rfkill_get;
-	sony_wwan_rfkill->user_claim_unsupported = 1;
-	sony_wwan_rfkill->data = (void *)SONY_WWAN;
-	err = rfkill_register(sony_wwan_rfkill);
-	if (err)
-		rfkill_free(sony_wwan_rfkill);
-	else {
-		sony_rfkill_devices[SONY_WWAN] = sony_wwan_rfkill;
-		sony_nc_rfkill_set(sony_wwan_rfkill->data,
-				RFKILL_STATE_UNBLOCKED);
-	}
-	return err;
-}
-
-static int sony_nc_setup_wimax_rfkill(struct acpi_device *device)
-{
-	int err = 0;
-	struct rfkill *sony_wimax_rfkill;
-
-	sony_wimax_rfkill = rfkill_allocate(&device->dev, RFKILL_TYPE_WIMAX);
-	if (!sony_wimax_rfkill)
-		return -1;
-	sony_wimax_rfkill->name = "sony-wimax";
-	sony_wimax_rfkill->toggle_radio = sony_nc_rfkill_set;
-	sony_wimax_rfkill->get_state = sony_nc_rfkill_get;
-	sony_wimax_rfkill->user_claim_unsupported = 1;
-	sony_wimax_rfkill->data = (void *)SONY_WIMAX;
-	err = rfkill_register(sony_wimax_rfkill);
-	if (err)
-		rfkill_free(sony_wimax_rfkill);
-	else {
-		sony_rfkill_devices[SONY_WIMAX] = sony_wimax_rfkill;
-		sony_nc_rfkill_set(sony_wimax_rfkill->data,
-				RFKILL_STATE_UNBLOCKED);
-	}
-	return err;
-}
-
-static void sony_nc_rfkill_update()
-{
-	int i;
-	enum rfkill_state state;
-
-	for (i = 0; i < SONY_RFKILL_MAX; i++) {
+	for (i = 0; i < N_SONY_RFKILL; i++) {
 		if (sony_rfkill_devices[i]) {
-			sony_rfkill_devices[i]->
-				get_state(sony_rfkill_devices[i]->data,
-					  &state);
-			rfkill_force_state(sony_rfkill_devices[i], state);
+			rfkill_unregister(sony_rfkill_devices[i]);
+			rfkill_destroy(sony_rfkill_devices[i]);
 		}
 	}
 }
 
-static int sony_nc_rfkill_setup(struct acpi_device *device)
+static int sony_nc_rfkill_set(void *data, bool blocked)
 {
-	int result, ret;
+	int result;
+	int argument = sony_rfkill_address[(long) data] + 0x100;
 
-	if (sony_find_snc_handle(0x124) == -1)
-		return -1;
+	if (!blocked)
+		argument |= 0xff0000;
 
-	ret = sony_call_snc_handle(0x124, 0xb00, &result);
-	if (ret) {
-		printk(KERN_INFO DRV_PFX
-		       "Unable to enumerate rfkill devices: %x\n", ret);
-		return ret;
+	return sony_call_snc_handle(sony_rfkill_handle, argument, &result);
+}
+
+static const struct rfkill_ops sony_rfkill_ops = {
+	.set_block = sony_nc_rfkill_set,
+};
+
+static int sony_nc_setup_rfkill(struct acpi_device *device,
+				enum sony_nc_rfkill nc_type)
+{
+	int err = 0;
+	struct rfkill *rfk;
+	enum rfkill_type type;
+	const char *name;
+	int result;
+	bool hwblock;
+
+	switch (nc_type) {
+	case SONY_WIFI:
+		type = RFKILL_TYPE_WLAN;
+		name = "sony-wifi";
+		break;
+	case SONY_BLUETOOTH:
+		type = RFKILL_TYPE_BLUETOOTH;
+		name = "sony-bluetooth";
+		break;
+	case SONY_WWAN:
+		type = RFKILL_TYPE_WWAN;
+		name = "sony-wwan";
+		break;
+	case SONY_WIMAX:
+		type = RFKILL_TYPE_WIMAX;
+		name = "sony-wimax";
+		break;
+	default:
+		return -EINVAL;
 	}
 
-	if (result & 0x1)
-		sony_nc_setup_wifi_rfkill(device);
-	if (result & 0x2)
-		sony_nc_setup_bluetooth_rfkill(device);
-	if (result & 0x1c)
-		sony_nc_setup_wwan_rfkill(device);
-	if (result & 0x20)
-		sony_nc_setup_wimax_rfkill(device);
+	rfk = rfkill_alloc(name, &device->dev, type,
+			   &sony_rfkill_ops, (void *)nc_type);
+	if (!rfk)
+		return -ENOMEM;
+
+	sony_call_snc_handle(sony_rfkill_handle, 0x200, &result);
+	hwblock = !(result & 0x1);
+	rfkill_set_hw_state(rfk, hwblock);
+
+	err = rfkill_register(rfk);
+	if (err) {
+		rfkill_destroy(rfk);
+		return err;
+	}
+	sony_rfkill_devices[nc_type] = rfk;
+	return err;
+}
+
+static void sony_nc_rfkill_update(void)
+{
+	enum sony_nc_rfkill i;
+	int result;
+	bool hwblock;
+
+	sony_call_snc_handle(sony_rfkill_handle, 0x200, &result);
+	hwblock = !(result & 0x1);
+
+	for (i = 0; i < N_SONY_RFKILL; i++) {
+		int argument = sony_rfkill_address[i];
+
+		if (!sony_rfkill_devices[i])
+			continue;
+
+		if (hwblock) {
+			if (rfkill_set_hw_state(sony_rfkill_devices[i], true)) {
+				/* we already know we're blocked */
+			}
+			continue;
+		}
+
+		sony_call_snc_handle(sony_rfkill_handle, argument, &result);
+		rfkill_set_states(sony_rfkill_devices[i],
+				  !(result & 0xf), false);
+	}
+}
+
+static void sony_nc_rfkill_setup(struct acpi_device *device)
+{
+	int offset;
+	u8 dev_code, i;
+	acpi_status status;
+	struct acpi_object_list params;
+	union acpi_object in_obj;
+	union acpi_object *device_enum;
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+
+	offset = sony_find_snc_handle(0x124);
+	if (offset == -1) {
+		offset = sony_find_snc_handle(0x135);
+		if (offset == -1)
+			return;
+		else
+			sony_rfkill_handle = 0x135;
+	} else
+		sony_rfkill_handle = 0x124;
+	dprintk("Found rkfill handle: 0x%.4x\n", sony_rfkill_handle);
+
+	/* need to read the whole buffer returned by the acpi call to SN06
+	 * here otherwise we may miss some features
+	 */
+	params.count = 1;
+	params.pointer = &in_obj;
+	in_obj.type = ACPI_TYPE_INTEGER;
+	in_obj.integer.value = offset;
+	status = acpi_evaluate_object(sony_nc_acpi_handle, "SN06", &params,
+			&buffer);
+	if (ACPI_FAILURE(status)) {
+		dprintk("Radio device enumeration failed\n");
+		return;
+	}
+
+	device_enum = (union acpi_object *) buffer.pointer;
+	if (!device_enum) {
+		pr_err("No SN06 return object\n");
+		goto out_no_enum;
+	}
+	if (device_enum->type != ACPI_TYPE_BUFFER) {
+		pr_err("Invalid SN06 return object 0x%.2x\n",
+		       device_enum->type);
+		goto out_no_enum;
+	}
+
+	/* the buffer is filled with magic numbers describing the devices
+	 * available, 0xff terminates the enumeration
+	 */
+	for (i = 0; i < device_enum->buffer.length; i++) {
+
+		dev_code = *(device_enum->buffer.pointer + i);
+		if (dev_code == 0xff)
+			break;
+
+		dprintk("Radio devices, looking at 0x%.2x\n", dev_code);
+
+		if (dev_code == 0 && !sony_rfkill_devices[SONY_WIFI])
+			sony_nc_setup_rfkill(device, SONY_WIFI);
+
+		if (dev_code == 0x10 && !sony_rfkill_devices[SONY_BLUETOOTH])
+			sony_nc_setup_rfkill(device, SONY_BLUETOOTH);
+
+		if ((0xf0 & dev_code) == 0x20 &&
+				!sony_rfkill_devices[SONY_WWAN])
+			sony_nc_setup_rfkill(device, SONY_WWAN);
+
+		if (dev_code == 0x30 && !sony_rfkill_devices[SONY_WIMAX])
+			sony_nc_setup_rfkill(device, SONY_WIMAX);
+	}
+
+out_no_enum:
+	kfree(buffer.pointer);
+	return;
+}
+
+/* Keyboard backlight feature */
+#define KBDBL_HANDLER	0x137
+#define KBDBL_PRESENT	0xB00
+#define	SET_MODE	0xC00
+#define SET_STATE	0xD00
+#define SET_TIMEOUT	0xE00
+
+struct kbd_backlight {
+	int mode;
+	int timeout;
+	struct device_attribute mode_attr;
+	struct device_attribute timeout_attr;
+};
+
+static struct kbd_backlight *kbdbl_handle;
+
+static ssize_t __sony_nc_kbd_backlight_mode_set(u8 value)
+{
+	int result;
+
+	if (value > 1)
+		return -EINVAL;
+
+	if (sony_call_snc_handle(KBDBL_HANDLER,
+				(value << 0x10) | SET_MODE, &result))
+		return -EIO;
+
+	/* Try to turn the light on/off immediately */
+	sony_call_snc_handle(KBDBL_HANDLER, (value << 0x10) | SET_STATE,
+			&result);
+
+	kbdbl_handle->mode = value;
 
 	return 0;
+}
+
+static ssize_t sony_nc_kbd_backlight_mode_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buffer, size_t count)
+{
+	int ret = 0;
+	unsigned long value;
+
+	if (count > 31)
+		return -EINVAL;
+
+	if (strict_strtoul(buffer, 10, &value))
+		return -EINVAL;
+
+	ret = __sony_nc_kbd_backlight_mode_set(value);
+	if (ret < 0)
+		return ret;
+
+	return count;
+}
+
+static ssize_t sony_nc_kbd_backlight_mode_show(struct device *dev,
+		struct device_attribute *attr, char *buffer)
+{
+	ssize_t count = 0;
+	count = snprintf(buffer, PAGE_SIZE, "%d\n", kbdbl_handle->mode);
+	return count;
+}
+
+static int __sony_nc_kbd_backlight_timeout_set(u8 value)
+{
+	int result;
+
+	if (value > 3)
+		return -EINVAL;
+
+	if (sony_call_snc_handle(KBDBL_HANDLER,
+				(value << 0x10) | SET_TIMEOUT, &result))
+		return -EIO;
+
+	kbdbl_handle->timeout = value;
+
+	return 0;
+}
+
+static ssize_t sony_nc_kbd_backlight_timeout_store(struct device *dev,
+		struct device_attribute *attr,
+		const char *buffer, size_t count)
+{
+	int ret = 0;
+	unsigned long value;
+
+	if (count > 31)
+		return -EINVAL;
+
+	if (strict_strtoul(buffer, 10, &value))
+		return -EINVAL;
+
+	ret = __sony_nc_kbd_backlight_timeout_set(value);
+	if (ret < 0)
+		return ret;
+
+	return count;
+}
+
+static ssize_t sony_nc_kbd_backlight_timeout_show(struct device *dev,
+		struct device_attribute *attr, char *buffer)
+{
+	ssize_t count = 0;
+	count = snprintf(buffer, PAGE_SIZE, "%d\n", kbdbl_handle->timeout);
+	return count;
+}
+
+static int sony_nc_kbd_backlight_setup(struct platform_device *pd)
+{
+	int result;
+
+	if (sony_call_snc_handle(KBDBL_HANDLER, KBDBL_PRESENT, &result))
+		return 0;
+	if (!(result & 0x02))
+		return 0;
+
+	kbdbl_handle = kzalloc(sizeof(*kbdbl_handle), GFP_KERNEL);
+	if (!kbdbl_handle)
+		return -ENOMEM;
+
+	sysfs_attr_init(&kbdbl_handle->mode_attr.attr);
+	kbdbl_handle->mode_attr.attr.name = "kbd_backlight";
+	kbdbl_handle->mode_attr.attr.mode = S_IRUGO | S_IWUSR;
+	kbdbl_handle->mode_attr.show = sony_nc_kbd_backlight_mode_show;
+	kbdbl_handle->mode_attr.store = sony_nc_kbd_backlight_mode_store;
+
+	sysfs_attr_init(&kbdbl_handle->timeout_attr.attr);
+	kbdbl_handle->timeout_attr.attr.name = "kbd_backlight_timeout";
+	kbdbl_handle->timeout_attr.attr.mode = S_IRUGO | S_IWUSR;
+	kbdbl_handle->timeout_attr.show = sony_nc_kbd_backlight_timeout_show;
+	kbdbl_handle->timeout_attr.store = sony_nc_kbd_backlight_timeout_store;
+
+	if (device_create_file(&pd->dev, &kbdbl_handle->mode_attr))
+		goto outkzalloc;
+
+	if (device_create_file(&pd->dev, &kbdbl_handle->timeout_attr))
+		goto outmode;
+
+	__sony_nc_kbd_backlight_mode_set(kbd_backlight);
+	__sony_nc_kbd_backlight_timeout_set(kbd_backlight_timeout);
+
+	return 0;
+
+outmode:
+	device_remove_file(&pd->dev, &kbdbl_handle->mode_attr);
+outkzalloc:
+	kfree(kbdbl_handle);
+	kbdbl_handle = NULL;
+	return -1;
+}
+
+static int sony_nc_kbd_backlight_cleanup(struct platform_device *pd)
+{
+	if (kbdbl_handle) {
+		int result;
+
+		device_remove_file(&pd->dev, &kbdbl_handle->mode_attr);
+		device_remove_file(&pd->dev, &kbdbl_handle->timeout_attr);
+
+		/* restore the default hw behaviour */
+		sony_call_snc_handle(KBDBL_HANDLER, 0x1000 | SET_MODE, &result);
+		sony_call_snc_handle(KBDBL_HANDLER, SET_TIMEOUT, &result);
+
+		kfree(kbdbl_handle);
+	}
+	return 0;
+}
+
+static void sony_nc_kbd_backlight_resume(void)
+{
+	int ignore = 0;
+
+	if (!kbdbl_handle)
+		return;
+
+	if (kbdbl_handle->mode == 0)
+		sony_call_snc_handle(KBDBL_HANDLER, SET_MODE, &ignore);
+
+	if (kbdbl_handle->timeout != 0)
+		sony_call_snc_handle(KBDBL_HANDLER,
+				(kbdbl_handle->timeout << 0x10) | SET_TIMEOUT,
+				&ignore);
+}
+
+static void sony_nc_backlight_ng_read_limits(int handle,
+		struct sony_backlight_props *props)
+{
+	int offset;
+	acpi_status status;
+	u8 brlvl, i;
+	u8 min = 0xff, max = 0x00;
+	struct acpi_object_list params;
+	union acpi_object in_obj;
+	union acpi_object *lvl_enum;
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+
+	props->handle = handle;
+	props->offset = 0;
+	props->maxlvl = 0xff;
+
+	offset = sony_find_snc_handle(handle);
+	if (offset < 0)
+		return;
+
+	/* try to read the boundaries from ACPI tables, if we fail the above
+	 * defaults should be reasonable
+	 */
+	params.count = 1;
+	params.pointer = &in_obj;
+	in_obj.type = ACPI_TYPE_INTEGER;
+	in_obj.integer.value = offset;
+	status = acpi_evaluate_object(sony_nc_acpi_handle, "SN06", &params,
+			&buffer);
+	if (ACPI_FAILURE(status))
+		return;
+
+	lvl_enum = (union acpi_object *) buffer.pointer;
+	if (!lvl_enum) {
+		pr_err("No SN06 return object.");
+		return;
+	}
+	if (lvl_enum->type != ACPI_TYPE_BUFFER) {
+		pr_err("Invalid SN06 return object 0x%.2x\n",
+		       lvl_enum->type);
+		goto out_invalid;
+	}
+
+	/* the buffer lists brightness levels available, brightness levels are
+	 * from 0 to 8 in the array, other values are used by ALS control.
+	 */
+	for (i = 0; i < 9 && i < lvl_enum->buffer.length; i++) {
+
+		brlvl = *(lvl_enum->buffer.pointer + i);
+		dprintk("Brightness level: %d\n", brlvl);
+
+		if (!brlvl)
+			break;
+
+		if (brlvl > max)
+			max = brlvl;
+		if (brlvl < min)
+			min = brlvl;
+	}
+	props->offset = min;
+	props->maxlvl = max;
+	dprintk("Brightness levels: min=%d max=%d\n", props->offset,
+			props->maxlvl);
+
+out_invalid:
+	kfree(buffer.pointer);
+	return;
+}
+
+static void sony_nc_backlight_setup(void)
+{
+	acpi_handle unused;
+	int max_brightness = 0;
+	const struct backlight_ops *ops = NULL;
+	struct backlight_properties props;
+
+	if (sony_find_snc_handle(0x12f) != -1) {
+		ops = &sony_backlight_ng_ops;
+		sony_nc_backlight_ng_read_limits(0x12f, &sony_bl_props);
+		max_brightness = sony_bl_props.maxlvl - sony_bl_props.offset;
+
+	} else if (sony_find_snc_handle(0x137) != -1) {
+		ops = &sony_backlight_ng_ops;
+		sony_nc_backlight_ng_read_limits(0x137, &sony_bl_props);
+		max_brightness = sony_bl_props.maxlvl - sony_bl_props.offset;
+
+	} else if (ACPI_SUCCESS(acpi_get_handle(sony_nc_acpi_handle, "GBRT",
+						&unused))) {
+		ops = &sony_backlight_ops;
+		max_brightness = SONY_MAX_BRIGHTNESS - 1;
+
+	} else
+		return;
+
+	memset(&props, 0, sizeof(struct backlight_properties));
+	props.type = BACKLIGHT_PLATFORM;
+	props.max_brightness = max_brightness;
+	sony_bl_props.dev = backlight_device_register("sony", NULL,
+						      &sony_bl_props,
+						      ops, &props);
+
+	if (IS_ERR(sony_bl_props.dev)) {
+		pr_warn("unable to register backlight device\n");
+		sony_bl_props.dev = NULL;
+	} else
+		sony_bl_props.dev->props.brightness =
+			ops->get_brightness(sony_bl_props.dev);
+}
+
+static void sony_nc_backlight_cleanup(void)
+{
+	if (sony_bl_props.dev)
+		backlight_device_unregister(sony_bl_props.dev);
 }
 
 static int sony_nc_add(struct acpi_device *device)
@@ -1232,8 +1679,7 @@ static int sony_nc_add(struct acpi_device *device)
 	acpi_handle handle;
 	struct sony_nc_value *item;
 
-	printk(KERN_INFO DRV_PFX "%s v%s.\n",
-		SONY_NC_DRIVER_NAME, SONY_LAPTOP_DRIVER_VERSION);
+	pr_info("%s v%s\n", SONY_NC_DRIVER_NAME, SONY_LAPTOP_DRIVER_VERSION);
 
 	sony_nc_acpi_device = device;
 	strcpy(acpi_device_class(device), "sony/hotkey");
@@ -1249,23 +1695,19 @@ static int sony_nc_add(struct acpi_device *device)
 		goto outwalk;
 	}
 
-	if (debug) {
-		status = acpi_walk_namespace(ACPI_TYPE_METHOD, sony_nc_acpi_handle,
-					     1, sony_walk_callback, NULL, NULL);
-		if (ACPI_FAILURE(status)) {
-			printk(KERN_WARNING DRV_PFX "unable to walk acpi resources\n");
-			result = -ENODEV;
-			goto outwalk;
-		}
-	}
+	result = sony_pf_add();
+	if (result)
+		goto outpresent;
 
-	/* try to _INI the device if such method exists (ACPI spec 3.0-6.5.1
-	 * should be respected as we already checked for the device presence above */
-	if (ACPI_SUCCESS(acpi_get_handle(sony_nc_acpi_handle, METHOD_NAME__INI, &handle))) {
-		dprintk("Invoking _INI\n");
-		if (ACPI_FAILURE(acpi_evaluate_object(sony_nc_acpi_handle, METHOD_NAME__INI,
-						NULL, NULL)))
-			dprintk("_INI Method failed\n");
+	if (debug) {
+		status = acpi_walk_namespace(ACPI_TYPE_METHOD,
+				sony_nc_acpi_handle, 1, sony_walk_callback,
+				NULL, NULL, NULL);
+		if (ACPI_FAILURE(status)) {
+			pr_warn("unable to walk acpi resources\n");
+			result = -ENODEV;
+			goto outpresent;
+		}
 	}
 
 	if (ACPI_SUCCESS(acpi_get_handle(sony_nc_acpi_handle, "ECON",
@@ -1277,6 +1719,12 @@ static int sony_nc_add(struct acpi_device *device)
 	if (ACPI_SUCCESS(acpi_get_handle(sony_nc_acpi_handle, "SN00",
 					 &handle))) {
 		dprintk("Doing SNC setup\n");
+		result = sony_nc_handles_setup(sony_pf_device);
+		if (result)
+			goto outpresent;
+		result = sony_nc_kbd_backlight_setup(sony_pf_device);
+		if (result)
+			goto outsnc;
 		sony_nc_function_setup(device);
 		sony_nc_rfkill_setup(device);
 	}
@@ -1284,36 +1732,15 @@ static int sony_nc_add(struct acpi_device *device)
 	/* setup input devices and helper fifo */
 	result = sony_laptop_setup_input(device);
 	if (result) {
-		printk(KERN_ERR DRV_PFX
-				"Unable to create input devices.\n");
-		goto outwalk;
+		pr_err("Unable to create input devices\n");
+		goto outkbdbacklight;
 	}
 
 	if (acpi_video_backlight_support()) {
-		printk(KERN_INFO DRV_PFX "brightness ignored, must be "
-		       "controlled by ACPI video driver\n");
-	} else if (ACPI_SUCCESS(acpi_get_handle(sony_nc_acpi_handle, "GBRT",
-						&handle))) {
-		sony_backlight_device = backlight_device_register("sony", NULL,
-								  NULL,
-								  &sony_backlight_ops);
-
-		if (IS_ERR(sony_backlight_device)) {
-			printk(KERN_WARNING DRV_PFX "unable to register backlight device\n");
-			sony_backlight_device = NULL;
-		} else {
-			sony_backlight_device->props.brightness =
-			    sony_backlight_get_brightness
-			    (sony_backlight_device);
-			sony_backlight_device->props.max_brightness =
-			    SONY_MAX_BRIGHTNESS - 1;
-		}
-
+		pr_info("brightness ignored, must be controlled by ACPI video driver\n");
+	} else {
+		sony_nc_backlight_setup();
 	}
-
-	result = sony_pf_add();
-	if (result)
-		goto outbacklight;
 
 	/* create sony_pf sysfs attributes related to the SNC device */
 	for (item = sony_nc_values; item->name; ++item) {
@@ -1360,13 +1787,18 @@ static int sony_nc_add(struct acpi_device *device)
 	for (item = sony_nc_values; item->name; ++item) {
 		device_remove_file(&sony_pf_device->dev, &item->devattr);
 	}
-	sony_pf_remove();
-
-      outbacklight:
-	if (sony_backlight_device)
-		backlight_device_unregister(sony_backlight_device);
+	sony_nc_backlight_cleanup();
 
 	sony_laptop_remove_input();
+
+      outkbdbacklight:
+	sony_nc_kbd_backlight_cleanup(sony_pf_device);
+
+      outsnc:
+	sony_nc_handles_cleanup(sony_pf_device);
+
+      outpresent:
+	sony_pf_remove();
 
       outwalk:
 	sony_nc_rfkill_cleanup();
@@ -1377,8 +1809,7 @@ static int sony_nc_remove(struct acpi_device *device, int type)
 {
 	struct sony_nc_value *item;
 
-	if (sony_backlight_device)
-		backlight_device_unregister(sony_backlight_device);
+	sony_nc_backlight_cleanup();
 
 	sony_nc_acpi_device = NULL;
 
@@ -1386,6 +1817,8 @@ static int sony_nc_remove(struct acpi_device *device, int type)
 		device_remove_file(&sony_pf_device->dev, &item->devattr);
 	}
 
+	sony_nc_kbd_backlight_cleanup(sony_pf_device);
+	sony_nc_handles_cleanup(sony_pf_device);
 	sony_pf_remove();
 	sony_laptop_remove_input();
 	sony_nc_rfkill_cleanup();
@@ -1424,7 +1857,6 @@ static struct acpi_driver sony_nc_driver = {
 #define SONYPI_DEVICE_TYPE1	0x00000001
 #define SONYPI_DEVICE_TYPE2	0x00000002
 #define SONYPI_DEVICE_TYPE3	0x00000004
-#define SONYPI_DEVICE_TYPE4	0x00000008
 
 #define SONYPI_TYPE1_OFFSET	0x04
 #define SONYPI_TYPE2_OFFSET	0x12
@@ -1447,33 +1879,28 @@ struct sonypi_eventtypes {
 	struct sonypi_event	*events;
 };
 
-struct device_ctrl {
-	int				model;
-	int				(*handle_irq)(const u8, const u8);
-	u16				evport_offset;
-	u8				has_camera;
-	u8				has_bluetooth;
-	u8				has_wwan;
-	struct sonypi_eventtypes	*event_types;
-};
-
 struct sony_pic_dev {
-	struct device_ctrl	*control;
-	struct acpi_device	*acpi_dev;
-	struct sony_pic_irq	*cur_irq;
-	struct sony_pic_ioport	*cur_ioport;
-	struct list_head	interrupts;
-	struct list_head	ioports;
-	struct mutex		lock;
-	u8			camera_power;
-	u8			bluetooth_power;
-	u8			wwan_power;
+	struct acpi_device		*acpi_dev;
+	struct sony_pic_irq		*cur_irq;
+	struct sony_pic_ioport		*cur_ioport;
+	struct list_head		interrupts;
+	struct list_head		ioports;
+	struct mutex			lock;
+	struct sonypi_eventtypes	*event_types;
+	int                             (*handle_irq)(const u8, const u8);
+	int				model;
+	u16				evport_offset;
+	u8				camera_power;
+	u8				bluetooth_power;
+	u8				wwan_power;
 };
 
 static struct sony_pic_dev spic_dev = {
 	.interrupts	= LIST_HEAD_INIT(spic_dev.interrupts),
 	.ioports	= LIST_HEAD_INIT(spic_dev.ioports),
 };
+
+static int spic_drv_registered;
 
 /* Event masks */
 #define SONYPI_JOGGER_MASK			0x00000001
@@ -1575,8 +2002,8 @@ static struct sonypi_event sonypi_blueev[] = {
 
 /* The set of possible wireless events */
 static struct sonypi_event sonypi_wlessev[] = {
-	{ 0x59, SONYPI_EVENT_WIRELESS_ON },
-	{ 0x5a, SONYPI_EVENT_WIRELESS_OFF },
+	{ 0x59, SONYPI_EVENT_IGNORE },
+	{ 0x5a, SONYPI_EVENT_IGNORE },
 	{ 0, 0 }
 };
 
@@ -1772,27 +2199,6 @@ static int type3_handle_irq(const u8 data_mask, const u8 ev)
 	return 1;
 }
 
-static struct device_ctrl spic_types[] = {
-	{
-		.model = SONYPI_DEVICE_TYPE1,
-		.handle_irq = NULL,
-		.evport_offset = SONYPI_TYPE1_OFFSET,
-		.event_types = type1_events,
-	},
-	{
-		.model = SONYPI_DEVICE_TYPE2,
-		.handle_irq = NULL,
-		.evport_offset = SONYPI_TYPE2_OFFSET,
-		.event_types = type2_events,
-	},
-	{
-		.model = SONYPI_DEVICE_TYPE3,
-		.handle_irq = type3_handle_irq,
-		.evport_offset = SONYPI_TYPE3_OFFSET,
-		.event_types = type3_events,
-	},
-};
-
 static void sony_pic_detect_device_type(struct sony_pic_dev *dev)
 {
 	struct pci_dev *pcidev;
@@ -1800,48 +2206,63 @@ static void sony_pic_detect_device_type(struct sony_pic_dev *dev)
 	pcidev = pci_get_device(PCI_VENDOR_ID_INTEL,
 			PCI_DEVICE_ID_INTEL_82371AB_3, NULL);
 	if (pcidev) {
-		dev->control = &spic_types[0];
+		dev->model = SONYPI_DEVICE_TYPE1;
+		dev->evport_offset = SONYPI_TYPE1_OFFSET;
+		dev->event_types = type1_events;
 		goto out;
 	}
 
 	pcidev = pci_get_device(PCI_VENDOR_ID_INTEL,
 			PCI_DEVICE_ID_INTEL_ICH6_1, NULL);
 	if (pcidev) {
-		dev->control = &spic_types[2];
+		dev->model = SONYPI_DEVICE_TYPE2;
+		dev->evport_offset = SONYPI_TYPE2_OFFSET;
+		dev->event_types = type2_events;
 		goto out;
 	}
 
 	pcidev = pci_get_device(PCI_VENDOR_ID_INTEL,
 			PCI_DEVICE_ID_INTEL_ICH7_1, NULL);
 	if (pcidev) {
-		dev->control = &spic_types[2];
+		dev->model = SONYPI_DEVICE_TYPE3;
+		dev->handle_irq = type3_handle_irq;
+		dev->evport_offset = SONYPI_TYPE3_OFFSET;
+		dev->event_types = type3_events;
 		goto out;
 	}
 
 	pcidev = pci_get_device(PCI_VENDOR_ID_INTEL,
 			PCI_DEVICE_ID_INTEL_ICH8_4, NULL);
 	if (pcidev) {
-		dev->control = &spic_types[2];
+		dev->model = SONYPI_DEVICE_TYPE3;
+		dev->handle_irq = type3_handle_irq;
+		dev->evport_offset = SONYPI_TYPE3_OFFSET;
+		dev->event_types = type3_events;
 		goto out;
 	}
 
 	pcidev = pci_get_device(PCI_VENDOR_ID_INTEL,
 			PCI_DEVICE_ID_INTEL_ICH9_1, NULL);
 	if (pcidev) {
-		dev->control = &spic_types[2];
+		dev->model = SONYPI_DEVICE_TYPE3;
+		dev->handle_irq = type3_handle_irq;
+		dev->evport_offset = SONYPI_TYPE3_OFFSET;
+		dev->event_types = type3_events;
 		goto out;
 	}
 
 	/* default */
-	dev->control = &spic_types[1];
+	dev->model = SONYPI_DEVICE_TYPE2;
+	dev->evport_offset = SONYPI_TYPE2_OFFSET;
+	dev->event_types = type2_events;
 
 out:
 	if (pcidev)
 		pci_dev_put(pcidev);
 
-	printk(KERN_INFO DRV_PFX "detected Type%d model\n",
-			dev->control->model == SONYPI_DEVICE_TYPE1 ? 1 :
-			dev->control->model == SONYPI_DEVICE_TYPE2 ? 2 : 3);
+	pr_info("detected Type%d model\n",
+		dev->model == SONYPI_DEVICE_TYPE1 ? 1 :
+		dev->model == SONYPI_DEVICE_TYPE2 ? 2 : 3);
 }
 
 /* camera tests and poweron/poweroff */
@@ -1887,7 +2308,7 @@ static int __sony_pic_camera_ready(void)
 static int __sony_pic_camera_off(void)
 {
 	if (!camera) {
-		printk(KERN_WARNING DRV_PFX "camera control not enabled\n");
+		pr_warn("camera control not enabled\n");
 		return -ENODEV;
 	}
 
@@ -1907,7 +2328,7 @@ static int __sony_pic_camera_on(void)
 	int i, j, x;
 
 	if (!camera) {
-		printk(KERN_WARNING DRV_PFX "camera control not enabled\n");
+		pr_warn("camera control not enabled\n");
 		return -ENODEV;
 	}
 
@@ -1930,7 +2351,7 @@ static int __sony_pic_camera_on(void)
 	}
 
 	if (j == 0) {
-		printk(KERN_WARNING DRV_PFX "failed to power on camera\n");
+		pr_warn("failed to power on camera\n");
 		return -ENODEV;
 	}
 
@@ -1986,8 +2407,7 @@ int sony_pic_camera_command(int command, u8 value)
 				ITERATIONS_SHORT);
 		break;
 	default:
-		printk(KERN_ERR DRV_PFX "sony_pic_camera_command invalid: %d\n",
-		       command);
+		pr_err("sony_pic_camera_command invalid: %d\n", command);
 		break;
 	}
 	mutex_unlock(&spic_dev.lock);
@@ -2147,7 +2567,7 @@ static struct attribute_group spic_attribute_group = {
 
 struct sonypi_compat_s {
 	struct fasync_struct	*fifo_async;
-	struct kfifo		*fifo;
+	struct kfifo		fifo;
 	spinlock_t		fifo_lock;
 	wait_queue_head_t	fifo_proc_list;
 	atomic_t		open_count;
@@ -2172,12 +2592,12 @@ static int sonypi_misc_open(struct inode *inode, struct file *file)
 	/* Flush input queue on first open */
 	unsigned long flags;
 
-	spin_lock_irqsave(sonypi_compat.fifo->lock, flags);
+	spin_lock_irqsave(&sonypi_compat.fifo_lock, flags);
 
 	if (atomic_inc_return(&sonypi_compat.open_count) == 1)
-		__kfifo_reset(sonypi_compat.fifo);
+		kfifo_reset(&sonypi_compat.fifo);
 
-	spin_unlock_irqrestore(sonypi_compat.fifo->lock, flags);
+	spin_unlock_irqrestore(&sonypi_compat.fifo_lock, flags);
 
 	return 0;
 }
@@ -2188,17 +2608,18 @@ static ssize_t sonypi_misc_read(struct file *file, char __user *buf,
 	ssize_t ret;
 	unsigned char c;
 
-	if ((kfifo_len(sonypi_compat.fifo) == 0) &&
+	if ((kfifo_len(&sonypi_compat.fifo) == 0) &&
 	    (file->f_flags & O_NONBLOCK))
 		return -EAGAIN;
 
 	ret = wait_event_interruptible(sonypi_compat.fifo_proc_list,
-				       kfifo_len(sonypi_compat.fifo) != 0);
+				       kfifo_len(&sonypi_compat.fifo) != 0);
 	if (ret)
 		return ret;
 
 	while (ret < count &&
-	       (kfifo_get(sonypi_compat.fifo, &c, sizeof(c)) == sizeof(c))) {
+	       (kfifo_out_locked(&sonypi_compat.fifo, &c, sizeof(c),
+			  &sonypi_compat.fifo_lock) == sizeof(c))) {
 		if (put_user(c, buf++))
 			return -EFAULT;
 		ret++;
@@ -2215,7 +2636,7 @@ static ssize_t sonypi_misc_read(struct file *file, char __user *buf,
 static unsigned int sonypi_misc_poll(struct file *file, poll_table *wait)
 {
 	poll_wait(file, &sonypi_compat.fifo_proc_list, wait);
-	if (kfifo_len(sonypi_compat.fifo))
+	if (kfifo_len(&sonypi_compat.fifo))
 		return POLLIN | POLLRDNORM;
 	return 0;
 }
@@ -2243,7 +2664,7 @@ static long sonypi_misc_ioctl(struct file *fp, unsigned int cmd,
 	mutex_lock(&spic_dev.lock);
 	switch (cmd) {
 	case SONYPI_IOCGBRT:
-		if (sony_backlight_device == NULL) {
+		if (sony_bl_props.dev == NULL) {
 			ret = -EIO;
 			break;
 		}
@@ -2256,7 +2677,7 @@ static long sonypi_misc_ioctl(struct file *fp, unsigned int cmd,
 				ret = -EFAULT;
 		break;
 	case SONYPI_IOCSBRT:
-		if (sony_backlight_device == NULL) {
+		if (sony_bl_props.dev == NULL) {
 			ret = -EIO;
 			break;
 		}
@@ -2270,8 +2691,8 @@ static long sonypi_misc_ioctl(struct file *fp, unsigned int cmd,
 			break;
 		}
 		/* sync the backlight device status */
-		sony_backlight_device->props.brightness =
-		    sony_backlight_get_brightness(sony_backlight_device);
+		sony_bl_props.dev->props.brightness =
+		    sony_backlight_get_brightness(sony_bl_props.dev);
 		break;
 	case SONYPI_IOCGBAT1CAP:
 		if (ec_read16(SONYPI_BAT1_FULL, &val16)) {
@@ -2367,6 +2788,7 @@ static const struct file_operations sonypi_misc_fops = {
 	.release	= sonypi_misc_release,
 	.fasync		= sonypi_misc_fasync,
 	.unlocked_ioctl	= sonypi_misc_ioctl,
+	.llseek		= noop_llseek,
 };
 
 static struct miscdevice sonypi_misc_device = {
@@ -2377,7 +2799,8 @@ static struct miscdevice sonypi_misc_device = {
 
 static void sonypi_compat_report_event(u8 event)
 {
-	kfifo_put(sonypi_compat.fifo, (unsigned char *)&event, sizeof(event));
+	kfifo_in_locked(&sonypi_compat.fifo, (unsigned char *)&event,
+			sizeof(event), &sonypi_compat.fifo_lock);
 	kill_fasync(&sonypi_compat.fifo_async, SIGIO, POLL_IN);
 	wake_up_interruptible(&sonypi_compat.fifo_proc_list);
 }
@@ -2387,11 +2810,11 @@ static int sonypi_compat_init(void)
 	int error;
 
 	spin_lock_init(&sonypi_compat.fifo_lock);
-	sonypi_compat.fifo = kfifo_alloc(SONY_LAPTOP_BUF_SIZE, GFP_KERNEL,
-					 &sonypi_compat.fifo_lock);
-	if (IS_ERR(sonypi_compat.fifo)) {
-		printk(KERN_ERR DRV_PFX "kfifo_alloc failed\n");
-		return PTR_ERR(sonypi_compat.fifo);
+	error =
+	 kfifo_alloc(&sonypi_compat.fifo, SONY_LAPTOP_BUF_SIZE, GFP_KERNEL);
+	if (error) {
+		pr_err("kfifo_alloc failed\n");
+		return error;
 	}
 
 	init_waitqueue_head(&sonypi_compat.fifo_proc_list);
@@ -2400,24 +2823,24 @@ static int sonypi_compat_init(void)
 		sonypi_misc_device.minor = minor;
 	error = misc_register(&sonypi_misc_device);
 	if (error) {
-		printk(KERN_ERR DRV_PFX "misc_register failed\n");
+		pr_err("misc_register failed\n");
 		goto err_free_kfifo;
 	}
 	if (minor == -1)
-		printk(KERN_INFO DRV_PFX "device allocated minor is %d\n",
-		       sonypi_misc_device.minor);
+		pr_info("device allocated minor is %d\n",
+			sonypi_misc_device.minor);
 
 	return 0;
 
 err_free_kfifo:
-	kfifo_free(sonypi_compat.fifo);
+	kfifo_free(&sonypi_compat.fifo);
 	return error;
 }
 
 static void sonypi_compat_exit(void)
 {
 	misc_deregister(&sonypi_misc_device);
-	kfifo_free(sonypi_compat.fifo);
+	kfifo_free(&sonypi_compat.fifo);
 }
 #else
 static int sonypi_compat_init(void) { return 0; }
@@ -2464,9 +2887,8 @@ sony_pic_read_possible_resource(struct acpi_resource *resource, void *context)
 			}
 			for (i = 0; i < p->interrupt_count; i++) {
 				if (!p->interrupts[i]) {
-					printk(KERN_WARNING DRV_PFX
-							"Invalid IRQ %d\n",
-							p->interrupts[i]);
+					pr_warn("Invalid IRQ %d\n",
+						p->interrupts[i]);
 					continue;
 				}
 				interrupt = kzalloc(sizeof(*interrupt),
@@ -2504,14 +2926,14 @@ sony_pic_read_possible_resource(struct acpi_resource *resource, void *context)
 						ioport->io2.address_length);
 			}
 			else {
-				printk(KERN_ERR DRV_PFX "Unknown SPIC Type, more than 2 IO Ports\n");
+				pr_err("Unknown SPIC Type, more than 2 IO Ports\n");
 				return AE_ERROR;
 			}
 			return AE_OK;
 		}
 	default:
 		dprintk("Resource %d isn't an IRQ nor an IO port\n",
-				resource->type);
+			resource->type);
 
 	case ACPI_RESOURCE_TYPE_END_TAG:
 		return AE_OK;
@@ -2532,7 +2954,7 @@ static int sony_pic_possible_resources(struct acpi_device *device)
 	dprintk("Evaluating _STA\n");
 	result = acpi_bus_get_status(device);
 	if (result) {
-		printk(KERN_WARNING DRV_PFX "Unable to read status\n");
+		pr_warn("Unable to read status\n");
 		goto end;
 	}
 
@@ -2548,9 +2970,7 @@ static int sony_pic_possible_resources(struct acpi_device *device)
 	status = acpi_walk_resources(device->handle, METHOD_NAME__PRS,
 			sony_pic_read_possible_resource, &spic_dev);
 	if (ACPI_FAILURE(status)) {
-		printk(KERN_WARNING DRV_PFX
-				"Failure evaluating %s\n",
-				METHOD_NAME__PRS);
+		pr_warn("Failure evaluating %s\n", METHOD_NAME__PRS);
 		result = -ENODEV;
 	}
 end:
@@ -2614,7 +3034,7 @@ static int sony_pic_enable(struct acpi_device *device,
 	buffer.pointer = resource;
 
 	/* setup Type 1 resources */
-	if (spic_dev.control->model == SONYPI_DEVICE_TYPE1) {
+	if (spic_dev.model == SONYPI_DEVICE_TYPE1) {
 
 		/* setup io resources */
 		resource->res1.type = ACPI_RESOURCE_TYPE_IO;
@@ -2663,7 +3083,7 @@ static int sony_pic_enable(struct acpi_device *device,
 
 	/* check for total failure */
 	if (ACPI_FAILURE(status)) {
-		printk(KERN_ERR DRV_PFX "Error evaluating _SRS\n");
+		pr_err("Error evaluating _SRS\n");
 		result = -ENODEV;
 		goto end;
 	}
@@ -2697,29 +3117,31 @@ static irqreturn_t sony_pic_irq(int irq, void *dev_id)
 		data_mask = inb_p(dev->cur_ioport->io2.minimum);
 	else
 		data_mask = inb_p(dev->cur_ioport->io1.minimum +
-				dev->control->evport_offset);
+				dev->evport_offset);
 
 	dprintk("event ([%.2x] [%.2x]) at port 0x%.4x(+0x%.2x)\n",
 			ev, data_mask, dev->cur_ioport->io1.minimum,
-			dev->control->evport_offset);
+			dev->evport_offset);
 
 	if (ev == 0x00 || ev == 0xff)
 		return IRQ_HANDLED;
 
-	for (i = 0; dev->control->event_types[i].mask; i++) {
+	for (i = 0; dev->event_types[i].mask; i++) {
 
-		if ((data_mask & dev->control->event_types[i].data) !=
-		    dev->control->event_types[i].data)
+		if ((data_mask & dev->event_types[i].data) !=
+		    dev->event_types[i].data)
 			continue;
 
-		if (!(mask & dev->control->event_types[i].mask))
+		if (!(mask & dev->event_types[i].mask))
 			continue;
 
-		for (j = 0; dev->control->event_types[i].events[j].event; j++) {
-			if (ev == dev->control->event_types[i].events[j].data) {
+		for (j = 0; dev->event_types[i].events[j].event; j++) {
+			if (ev == dev->event_types[i].events[j].data) {
 				device_event =
-					dev->control->
-						event_types[i].events[j].event;
+					dev->event_types[i].events[j].event;
+				/* some events may require ignoring */
+				if (!device_event)
+					return IRQ_HANDLED;
 				goto found;
 			}
 		}
@@ -2727,20 +3149,18 @@ static irqreturn_t sony_pic_irq(int irq, void *dev_id)
 	/* Still not able to decode the event try to pass
 	 * it over to the minidriver
 	 */
-	if (dev->control->handle_irq &&
-			dev->control->handle_irq(data_mask, ev) == 0)
+	if (dev->handle_irq && dev->handle_irq(data_mask, ev) == 0)
 		return IRQ_HANDLED;
 
 	dprintk("unknown event ([%.2x] [%.2x]) at port 0x%.4x(+0x%.2x)\n",
 			ev, data_mask, dev->cur_ioport->io1.minimum,
-			dev->control->evport_offset);
+			dev->evport_offset);
 	return IRQ_HANDLED;
 
 found:
 	sony_laptop_report_input_event(device_event);
 	acpi_bus_generate_proc_event(dev->acpi_dev, 1, device_event);
 	sonypi_compat_report_event(device_event);
-
 	return IRQ_HANDLED;
 }
 
@@ -2755,7 +3175,7 @@ static int sony_pic_remove(struct acpi_device *device, int type)
 	struct sony_pic_irq *irq, *tmp_irq;
 
 	if (sony_pic_disable(device)) {
-		printk(KERN_ERR DRV_PFX "Couldn't disable device.\n");
+		pr_err("Couldn't disable device\n");
 		return -ENXIO;
 	}
 
@@ -2795,8 +3215,7 @@ static int sony_pic_add(struct acpi_device *device)
 	struct sony_pic_ioport *io, *tmp_io;
 	struct sony_pic_irq *irq, *tmp_irq;
 
-	printk(KERN_INFO DRV_PFX "%s v%s.\n",
-		SONY_PIC_DRIVER_NAME, SONY_LAPTOP_DRIVER_VERSION);
+	pr_info("%s v%s\n", SONY_PIC_DRIVER_NAME, SONY_LAPTOP_DRIVER_VERSION);
 
 	spic_dev.acpi_dev = device;
 	strcpy(acpi_device_class(device), "sony/hotkey");
@@ -2806,16 +3225,14 @@ static int sony_pic_add(struct acpi_device *device)
 	/* read _PRS resources */
 	result = sony_pic_possible_resources(device);
 	if (result) {
-		printk(KERN_ERR DRV_PFX
-				"Unable to read possible resources.\n");
+		pr_err("Unable to read possible resources\n");
 		goto err_free_resources;
 	}
 
 	/* setup input devices and helper fifo */
 	result = sony_laptop_setup_input(device);
 	if (result) {
-		printk(KERN_ERR DRV_PFX
-				"Unable to create input devices.\n");
+		pr_err("Unable to create input devices\n");
 		goto err_free_resources;
 	}
 
@@ -2825,7 +3242,7 @@ static int sony_pic_add(struct acpi_device *device)
 	/* request io port */
 	list_for_each_entry_reverse(io, &spic_dev.ioports, list) {
 		if (request_region(io->io1.minimum, io->io1.address_length,
-					"Sony Programable I/O Device")) {
+					"Sony Programmable I/O Device")) {
 			dprintk("I/O port1: 0x%.4x (0x%.4x) + 0x%.2x\n",
 					io->io1.minimum, io->io1.maximum,
 					io->io1.address_length);
@@ -2833,7 +3250,7 @@ static int sony_pic_add(struct acpi_device *device)
 			if (io->io2.minimum) {
 				if (request_region(io->io2.minimum,
 						io->io2.address_length,
-						"Sony Programable I/O Device")) {
+						"Sony Programmable I/O Device")) {
 					dprintk("I/O port2: 0x%.4x (0x%.4x) + 0x%.2x\n",
 							io->io2.minimum, io->io2.maximum,
 							io->io2.address_length);
@@ -2856,7 +3273,7 @@ static int sony_pic_add(struct acpi_device *device)
 		}
 	}
 	if (!spic_dev.cur_ioport) {
-		printk(KERN_ERR DRV_PFX "Failed to request_region.\n");
+		pr_err("Failed to request_region\n");
 		result = -ENODEV;
 		goto err_remove_compat;
 	}
@@ -2864,7 +3281,7 @@ static int sony_pic_add(struct acpi_device *device)
 	/* request IRQ */
 	list_for_each_entry_reverse(irq, &spic_dev.interrupts, list) {
 		if (!request_irq(irq->irq.interrupts[0], sony_pic_irq,
-					IRQF_SHARED, "sony-laptop", &spic_dev)) {
+					IRQF_DISABLED, "sony-laptop", &spic_dev)) {
 			dprintk("IRQ: %d - triggering: %d - "
 					"polarity: %d - shr: %d\n",
 					irq->irq.interrupts[0],
@@ -2876,7 +3293,7 @@ static int sony_pic_add(struct acpi_device *device)
 		}
 	}
 	if (!spic_dev.cur_irq) {
-		printk(KERN_ERR DRV_PFX "Failed to request_irq.\n");
+		pr_err("Failed to request_irq\n");
 		result = -ENODEV;
 		goto err_release_region;
 	}
@@ -2884,7 +3301,7 @@ static int sony_pic_add(struct acpi_device *device)
 	/* set resource status _SRS */
 	result = sony_pic_enable(device, spic_dev.cur_ioport, spic_dev.cur_irq);
 	if (result) {
-		printk(KERN_ERR DRV_PFX "Couldn't enable device.\n");
+		pr_err("Couldn't enable device\n");
 		goto err_free_irq;
 	}
 
@@ -2993,22 +3410,22 @@ static int __init sony_laptop_init(void)
 	if (!no_spic && dmi_check_system(sonypi_dmi_table)) {
 		result = acpi_bus_register_driver(&sony_pic_driver);
 		if (result) {
-			printk(KERN_ERR DRV_PFX
-					"Unable to register SPIC driver.");
+			pr_err("Unable to register SPIC driver\n");
 			goto out;
 		}
+		spic_drv_registered = 1;
 	}
 
 	result = acpi_bus_register_driver(&sony_nc_driver);
 	if (result) {
-		printk(KERN_ERR DRV_PFX "Unable to register SNC driver.");
+		pr_err("Unable to register SNC driver\n");
 		goto out_unregister_pic;
 	}
 
 	return 0;
 
 out_unregister_pic:
-	if (!no_spic)
+	if (spic_drv_registered)
 		acpi_bus_unregister_driver(&sony_pic_driver);
 out:
 	return result;
@@ -3017,7 +3434,7 @@ out:
 static void __exit sony_laptop_exit(void)
 {
 	acpi_bus_unregister_driver(&sony_nc_driver);
-	if (!no_spic)
+	if (spic_drv_registered)
 		acpi_bus_unregister_driver(&sony_pic_driver);
 }
 

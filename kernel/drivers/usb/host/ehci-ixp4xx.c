@@ -23,7 +23,7 @@ static int ixp4xx_ehci_init(struct usb_hcd *hcd)
 
 	ehci->caps = hcd->regs + 0x100;
 	ehci->regs = hcd->regs + 0x100
-		+ HC_LENGTH(ehci_readl(ehci, &ehci->caps->hc_capbase));
+		+ HC_LENGTH(ehci, ehci_readl(ehci, &ehci->caps->hc_capbase));
 	ehci->hcs_params = ehci_readl(ehci, &ehci->caps->hcs_params);
 
 	hcd->has_tt = 1;
@@ -51,6 +51,7 @@ static const struct hc_driver ixp4xx_ehci_hc_driver = {
 	.urb_enqueue		= ehci_urb_enqueue,
 	.urb_dequeue		= ehci_urb_dequeue,
 	.endpoint_disable	= ehci_endpoint_disable,
+	.endpoint_reset		= ehci_endpoint_reset,
 	.get_frame_number	= ehci_get_frame,
 	.hub_status_data	= ehci_hub_status_data,
 	.hub_control		= ehci_hub_control,
@@ -60,6 +61,8 @@ static const struct hc_driver ixp4xx_ehci_hc_driver = {
 #endif
 	.relinquish_port	= ehci_relinquish_port,
 	.port_handed_over	= ehci_port_handed_over,
+
+	.clear_tt_buffer_complete	= ehci_clear_tt_buffer_complete,
 };
 
 static int ixp4xx_ehci_probe(struct platform_device *pdev)
@@ -97,7 +100,7 @@ static int ixp4xx_ehci_probe(struct platform_device *pdev)
 		goto fail_request_resource;
 	}
 	hcd->rsrc_start = res->start;
-	hcd->rsrc_len = res->end - res->start + 1;
+	hcd->rsrc_len = resource_size(res);
 
 	if (!request_mem_region(hcd->rsrc_start, hcd->rsrc_len,
 				driver->description)) {

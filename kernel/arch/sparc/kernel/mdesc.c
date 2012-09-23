@@ -4,12 +4,13 @@
  */
 #include <linux/kernel.h>
 #include <linux/types.h>
-#include <linux/lmb.h>
+#include <linux/memblock.h>
 #include <linux/log2.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/miscdevice.h>
+#include <linux/bootmem.h>
 
 #include <asm/cpudata.h>
 #include <asm/hypervisor.h>
@@ -85,7 +86,7 @@ static void mdesc_handle_init(struct mdesc_handle *hp,
 	hp->handle_size = handle_size;
 }
 
-static struct mdesc_handle * __init mdesc_lmb_alloc(unsigned int mdesc_size)
+static struct mdesc_handle * __init mdesc_memblock_alloc(unsigned int mdesc_size)
 {
 	unsigned int handle_size, alloc_size;
 	struct mdesc_handle *hp;
@@ -96,7 +97,7 @@ static struct mdesc_handle * __init mdesc_lmb_alloc(unsigned int mdesc_size)
 		       mdesc_size);
 	alloc_size = PAGE_ALIGN(handle_size);
 
-	paddr = lmb_alloc(alloc_size, PAGE_SIZE);
+	paddr = memblock_alloc(alloc_size, PAGE_SIZE);
 
 	hp = NULL;
 	if (paddr) {
@@ -106,32 +107,22 @@ static struct mdesc_handle * __init mdesc_lmb_alloc(unsigned int mdesc_size)
 	return hp;
 }
 
-static void mdesc_lmb_free(struct mdesc_handle *hp)
+static void __init mdesc_memblock_free(struct mdesc_handle *hp)
 {
-	unsigned int alloc_size, handle_size = hp->handle_size;
-	unsigned long start, end;
+	unsigned int alloc_size;
+	unsigned long start;
 
 	BUG_ON(atomic_read(&hp->refcnt) != 0);
 	BUG_ON(!list_empty(&hp->list));
 
-	alloc_size = PAGE_ALIGN(handle_size);
-
-	start = (unsigned long) hp;
-	end = start + alloc_size;
-
-	while (start < end) {
-		struct page *p;
-
-		p = virt_to_page(start);
-		ClearPageReserved(p);
-		__free_page(p);
-		start += PAGE_SIZE;
-	}
+	alloc_size = PAGE_ALIGN(hp->handle_size);
+	start = __pa(hp);
+	free_bootmem_late(start, alloc_size);
 }
 
-static struct mdesc_mem_ops lmb_mdesc_ops = {
-	.alloc = mdesc_lmb_alloc,
-	.free  = mdesc_lmb_free,
+static struct mdesc_mem_ops memblock_mdesc_ops = {
+	.alloc = mdesc_memblock_alloc,
+	.free  = mdesc_memblock_free,
 };
 
 static struct mdesc_handle *mdesc_kmalloc(unsigned int mdesc_size)
@@ -517,6 +508,8 @@ const char *mdesc_node_name(struct mdesc_handle *hp, u64 node)
 }
 EXPORT_SYMBOL(mdesc_node_name);
 
+static u64 max_cpus = 64;
+
 static void __init report_platform_properties(void)
 {
 	struct mdesc_handle *hp = mdesc_grab();
@@ -552,8 +545,10 @@ static void __init report_platform_properties(void)
 	if (v)
 		printk("PLATFORM: watchdog-max-timeout [%llu ms]\n", *v);
 	v = mdesc_get_property(hp, pn, "max-cpus", NULL);
-	if (v)
-		printk("PLATFORM: max-cpus [%llu]\n", *v);
+	if (v) {
+		max_cpus = *v;
+		printk("PLATFORM: max-cpus [%llu]\n", max_cpus);
+	}
 
 #ifdef CONFIG_SMP
 	{
@@ -574,7 +569,7 @@ static void __init report_platform_properties(void)
 	mdesc_release(hp);
 }
 
-static void __devinit fill_in_one_cache(cpuinfo_sparc *c,
+static void __cpuinit fill_in_one_cache(cpuinfo_sparc *c,
 					struct mdesc_handle *hp,
 					u64 mp)
 {
@@ -619,8 +614,7 @@ static void __devinit fill_in_one_cache(cpuinfo_sparc *c,
 	}
 }
 
-static void __devinit mark_core_ids(struct mdesc_handle *hp, u64 mp,
-				    int core_id)
+static void __cpuinit mark_core_ids(struct mdesc_handle *hp, u64 mp, int core_id)
 {
 	u64 a;
 
@@ -653,7 +647,7 @@ static void __devinit mark_core_ids(struct mdesc_handle *hp, u64 mp,
 	}
 }
 
-static void __devinit set_core_ids(struct mdesc_handle *hp)
+static void __cpuinit set_core_ids(struct mdesc_handle *hp)
 {
 	int idx;
 	u64 mp;
@@ -678,8 +672,7 @@ static void __devinit set_core_ids(struct mdesc_handle *hp)
 	}
 }
 
-static void __devinit mark_proc_ids(struct mdesc_handle *hp, u64 mp,
-				    int proc_id)
+static void __cpuinit mark_proc_ids(struct mdesc_handle *hp, u64 mp, int proc_id)
 {
 	u64 a;
 
@@ -698,8 +691,7 @@ static void __devinit mark_proc_ids(struct mdesc_handle *hp, u64 mp,
 	}
 }
 
-static void __devinit __set_proc_ids(struct mdesc_handle *hp,
-				     const char *exec_unit_name)
+static void __cpuinit __set_proc_ids(struct mdesc_handle *hp, const char *exec_unit_name)
 {
 	int idx;
 	u64 mp;
@@ -720,14 +712,14 @@ static void __devinit __set_proc_ids(struct mdesc_handle *hp,
 	}
 }
 
-static void __devinit set_proc_ids(struct mdesc_handle *hp)
+static void __cpuinit set_proc_ids(struct mdesc_handle *hp)
 {
 	__set_proc_ids(hp, "exec_unit");
 	__set_proc_ids(hp, "exec-unit");
 }
 
-static void __devinit get_one_mondo_bits(const u64 *p, unsigned int *mask,
-					 unsigned char def)
+static void __cpuinit get_one_mondo_bits(const u64 *p, unsigned int *mask,
+					 unsigned long def, unsigned long max)
 {
 	u64 val;
 
@@ -738,6 +730,9 @@ static void __devinit get_one_mondo_bits(const u64 *p, unsigned int *mask,
 	if (!val || val >= 64)
 		goto use_default;
 
+	if (val > max)
+		val = max;
+
 	*mask = ((1U << val) * 64U) - 1U;
 	return;
 
@@ -745,41 +740,42 @@ use_default:
 	*mask = ((1U << def) * 64U) - 1U;
 }
 
-static void __devinit get_mondo_data(struct mdesc_handle *hp, u64 mp,
+static void __cpuinit get_mondo_data(struct mdesc_handle *hp, u64 mp,
 				     struct trap_per_cpu *tb)
 {
+	static int printed;
 	const u64 *val;
 
 	val = mdesc_get_property(hp, mp, "q-cpu-mondo-#bits", NULL);
-	get_one_mondo_bits(val, &tb->cpu_mondo_qmask, 7);
+	get_one_mondo_bits(val, &tb->cpu_mondo_qmask, 7, ilog2(max_cpus * 2));
 
 	val = mdesc_get_property(hp, mp, "q-dev-mondo-#bits", NULL);
-	get_one_mondo_bits(val, &tb->dev_mondo_qmask, 7);
+	get_one_mondo_bits(val, &tb->dev_mondo_qmask, 7, 8);
 
 	val = mdesc_get_property(hp, mp, "q-resumable-#bits", NULL);
-	get_one_mondo_bits(val, &tb->resum_qmask, 6);
+	get_one_mondo_bits(val, &tb->resum_qmask, 6, 7);
 
 	val = mdesc_get_property(hp, mp, "q-nonresumable-#bits", NULL);
-	get_one_mondo_bits(val, &tb->nonresum_qmask, 2);
+	get_one_mondo_bits(val, &tb->nonresum_qmask, 2, 2);
+	if (!printed++) {
+		pr_info("SUN4V: Mondo queue sizes "
+			"[cpu(%u) dev(%u) r(%u) nr(%u)]\n",
+			tb->cpu_mondo_qmask + 1,
+			tb->dev_mondo_qmask + 1,
+			tb->resum_qmask + 1,
+			tb->nonresum_qmask + 1);
+	}
 }
 
-void __cpuinit mdesc_fill_in_cpu_data(cpumask_t mask)
+static void * __cpuinit mdesc_iterate_over_cpus(void *(*func)(struct mdesc_handle *, u64, int, void *), void *arg, cpumask_t *mask)
 {
 	struct mdesc_handle *hp = mdesc_grab();
+	void *ret = NULL;
 	u64 mp;
 
-	ncpus_probed = 0;
 	mdesc_for_each_node_by_name(hp, mp, "cpu") {
 		const u64 *id = mdesc_get_property(hp, mp, "id", NULL);
-		const u64 *cfreq = mdesc_get_property(hp, mp, "clock-frequency", NULL);
-		struct trap_per_cpu *tb;
-		cpuinfo_sparc *c;
-		int cpuid;
-		u64 a;
-
-		ncpus_probed++;
-
-		cpuid = *id;
+		int cpuid = *id;
 
 #ifdef CONFIG_SMP
 		if (cpuid >= NR_CPUS) {
@@ -788,62 +784,104 @@ void __cpuinit mdesc_fill_in_cpu_data(cpumask_t mask)
 			       cpuid, NR_CPUS);
 			continue;
 		}
-		if (!cpu_isset(cpuid, mask))
+		if (!cpumask_test_cpu(cpuid, mask))
 			continue;
-#else
-		/* On uniprocessor we only want the values for the
-		 * real physical cpu the kernel booted onto, however
-		 * cpu_data() only has one entry at index 0.
-		 */
-		if (cpuid != real_hard_smp_processor_id())
-			continue;
-		cpuid = 0;
 #endif
 
-		c = &cpu_data(cpuid);
-		c->clock_tick = *cfreq;
+		ret = func(hp, mp, cpuid, arg);
+		if (ret)
+			goto out;
+	}
+out:
+	mdesc_release(hp);
+	return ret;
+}
 
-		tb = &trap_block[cpuid];
-		get_mondo_data(hp, mp, tb);
+static void * __cpuinit record_one_cpu(struct mdesc_handle *hp, u64 mp, int cpuid, void *arg)
+{
+	ncpus_probed++;
+#ifdef CONFIG_SMP
+	set_cpu_present(cpuid, true);
+#endif
+	return NULL;
+}
 
-		mdesc_for_each_arc(a, hp, mp, MDESC_ARC_TYPE_FWD) {
-			u64 j, t = mdesc_arc_target(hp, a);
-			const char *t_name;
+void __cpuinit mdesc_populate_present_mask(cpumask_t *mask)
+{
+	if (tlb_type != hypervisor)
+		return;
 
-			t_name = mdesc_node_name(hp, t);
-			if (!strcmp(t_name, "cache")) {
-				fill_in_one_cache(c, hp, t);
-				continue;
-			}
+	ncpus_probed = 0;
+	mdesc_iterate_over_cpus(record_one_cpu, NULL, mask);
+}
 
-			mdesc_for_each_arc(j, hp, t, MDESC_ARC_TYPE_FWD) {
-				u64 n = mdesc_arc_target(hp, j);
-				const char *n_name;
+static void * __cpuinit fill_in_one_cpu(struct mdesc_handle *hp, u64 mp, int cpuid, void *arg)
+{
+	const u64 *cfreq = mdesc_get_property(hp, mp, "clock-frequency", NULL);
+	struct trap_per_cpu *tb;
+	cpuinfo_sparc *c;
+	u64 a;
 
-				n_name = mdesc_node_name(hp, n);
-				if (!strcmp(n_name, "cache"))
-					fill_in_one_cache(c, hp, n);
-			}
+#ifndef CONFIG_SMP
+	/* On uniprocessor we only want the values for the
+	 * real physical cpu the kernel booted onto, however
+	 * cpu_data() only has one entry at index 0.
+	 */
+	if (cpuid != real_hard_smp_processor_id())
+		return NULL;
+	cpuid = 0;
+#endif
+
+	c = &cpu_data(cpuid);
+	c->clock_tick = *cfreq;
+
+	tb = &trap_block[cpuid];
+	get_mondo_data(hp, mp, tb);
+
+	mdesc_for_each_arc(a, hp, mp, MDESC_ARC_TYPE_FWD) {
+		u64 j, t = mdesc_arc_target(hp, a);
+		const char *t_name;
+
+		t_name = mdesc_node_name(hp, t);
+		if (!strcmp(t_name, "cache")) {
+			fill_in_one_cache(c, hp, t);
+			continue;
 		}
 
-#ifdef CONFIG_SMP
-		cpu_set(cpuid, cpu_present_map);
-#endif
+		mdesc_for_each_arc(j, hp, t, MDESC_ARC_TYPE_FWD) {
+			u64 n = mdesc_arc_target(hp, j);
+			const char *n_name;
 
-		c->core_id = 0;
-		c->proc_id = -1;
+			n_name = mdesc_node_name(hp, n);
+			if (!strcmp(n_name, "cache"))
+				fill_in_one_cache(c, hp, n);
+		}
 	}
+
+	c->core_id = 0;
+	c->proc_id = -1;
+
+	return NULL;
+}
+
+void __cpuinit mdesc_fill_in_cpu_data(cpumask_t *mask)
+{
+	struct mdesc_handle *hp;
+
+	mdesc_iterate_over_cpus(fill_in_one_cpu, NULL, mask);
 
 #ifdef CONFIG_SMP
 	sparc64_multi_core = 1;
 #endif
 
+	hp = mdesc_grab();
+
 	set_core_ids(hp);
 	set_proc_ids(hp);
 
-	smp_fill_in_sib_core_maps();
-
 	mdesc_release(hp);
+
+	smp_fill_in_sib_core_maps();
 }
 
 static ssize_t mdesc_read(struct file *file, char __user *buf,
@@ -868,6 +906,7 @@ static ssize_t mdesc_read(struct file *file, char __user *buf,
 static const struct file_operations mdesc_fops = {
 	.read	= mdesc_read,
 	.owner	= THIS_MODULE,
+	.llseek = noop_llseek,
 };
 
 static struct miscdevice mdesc_misc = {
@@ -887,13 +926,12 @@ void __init sun4v_mdesc_init(void)
 {
 	struct mdesc_handle *hp;
 	unsigned long len, real_len, status;
-	cpumask_t mask;
 
 	(void) sun4v_mach_desc(0UL, 0UL, &len);
 
 	printk("MDESC: Size is %lu bytes.\n", len);
 
-	hp = mdesc_alloc(len, &lmb_mdesc_ops);
+	hp = mdesc_alloc(len, &memblock_mdesc_ops);
 	if (hp == NULL) {
 		prom_printf("MDESC: alloc of %lu bytes failed.\n", len);
 		prom_halt();
@@ -911,7 +949,4 @@ void __init sun4v_mdesc_init(void)
 	cur_mdesc = hp;
 
 	report_platform_properties();
-
-	cpus_setall(mask);
-	mdesc_fill_in_cpu_data(mask);
 }

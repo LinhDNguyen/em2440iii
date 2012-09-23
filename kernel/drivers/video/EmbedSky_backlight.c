@@ -26,11 +26,12 @@ COPYRIGHT:www.embedsky.net
 #include <mach/fb.h>
 #include <linux/cdev.h>
 
+#include <linux/gpio.h>
+
 #define DEVICE_NAME	"backlight"
 
 
-static int tq2440_backlight_ioctl(
-	struct inode *inode, 
+static long tq2440_backlight_ioctl(
 	struct file *file, 
 	unsigned int cmd, 
 	unsigned long arg)
@@ -38,11 +39,11 @@ static int tq2440_backlight_ioctl(
 	switch(cmd)
 	{
 		case 0:
-			s3c2410_gpio_setpin(S3C2410_GPG4, 0);
+			gpio_set_value(S3C2410_GPG(4), 0);
 			printk(DEVICE_NAME " Turn Off!\n");
 			return 0;
 		case 1:
-			s3c2410_gpio_setpin(S3C2410_GPG4, 1);
+			gpio_set_value(S3C2410_GPG(4), 1);
 			printk(DEVICE_NAME " Turn On!\n");
 			return 0;
 		default:
@@ -52,7 +53,7 @@ static int tq2440_backlight_ioctl(
 
 static struct file_operations dev_fops = {
 	.owner	=	THIS_MODULE,
-	.ioctl	=	tq2440_backlight_ioctl
+	.compat_ioctl	=	tq2440_backlight_ioctl
 };
 
 static struct miscdevice misc = {
@@ -69,7 +70,7 @@ static int __init dev_init(void)
 
 	printk (DEVICE_NAME" initialized\n");
 
-	s3c2410_gpio_cfgpin(S3C2410_GPG4, S3C2410_GPG4_OUTP);
+	s3c_gpio_cfgpin(S3C2410_GPG(4), S3C2410_GPIO_OUTPUT);
 	return ret;
 }
 

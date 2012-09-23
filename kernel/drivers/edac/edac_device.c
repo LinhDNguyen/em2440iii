@@ -346,33 +346,18 @@ fail1:
 }
 
 /*
- * complete_edac_device_list_del
- *
- *	callback function when reference count is zero
- */
-static void complete_edac_device_list_del(struct rcu_head *head)
-{
-	struct edac_device_ctl_info *edac_dev;
-
-	edac_dev = container_of(head, struct edac_device_ctl_info, rcu);
-	INIT_LIST_HEAD(&edac_dev->link);
-	complete(&edac_dev->removal_complete);
-}
-
-/*
  * del_edac_device_from_global_list
- *
- *	remove the RCU, setup for a callback call,
- *	then wait for the callback to occur
  */
 static void del_edac_device_from_global_list(struct edac_device_ctl_info
 						*edac_device)
 {
 	list_del_rcu(&edac_device->link);
 
-	init_completion(&edac_device->removal_complete);
-	call_rcu(&edac_device->rcu, complete_edac_device_list_del);
-	wait_for_completion(&edac_device->removal_complete);
+	/* these are for safe removal of devices from global list while
+	 * NMI handlers may be traversing list
+	 */
+	synchronize_rcu();
+	INIT_LIST_HEAD(&edac_device->link);
 }
 
 /*
@@ -489,6 +474,20 @@ void edac_device_reset_delay_period(struct edac_device_ctl_info *edac_dev,
 
 	mutex_unlock(&device_ctls_mutex);
 }
+
+/*
+ * edac_device_alloc_index: Allocate a unique device index number
+ *
+ * Return:
+ *	allocated index number
+ */
+int edac_device_alloc_index(void)
+{
+	static atomic_t device_indexes = ATOMIC_INIT(0);
+
+	return atomic_inc_return(&device_indexes) - 1;
+}
+EXPORT_SYMBOL_GPL(edac_device_alloc_index);
 
 /**
  * edac_device_add_device: Insert the 'edac_dev' structure into the
@@ -661,7 +660,7 @@ void edac_device_handle_ce(struct edac_device_ctl_info *edac_dev,
 		block->counters.ce_count++;
 	}
 
-	/* Propogate the count up the 'totals' tree */
+	/* Propagate the count up the 'totals' tree */
 	instance->counters.ce_count++;
 	edac_dev->counters.ce_count++;
 
@@ -707,7 +706,7 @@ void edac_device_handle_ue(struct edac_device_ctl_info *edac_dev,
 		block->counters.ue_count++;
 	}
 
-	/* Propogate the count up the 'totals' tree */
+	/* Propagate the count up the 'totals' tree */
 	instance->counters.ue_count++;
 	edac_dev->counters.ue_count++;
 

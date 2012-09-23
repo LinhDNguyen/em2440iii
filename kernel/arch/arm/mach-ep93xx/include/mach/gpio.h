@@ -99,8 +99,6 @@
 /* maximum value for irq capable line identifiers */
 #define EP93XX_GPIO_LINE_MAX_IRQ	EP93XX_GPIO_LINE_F(7)
 
-extern void ep93xx_gpio_int_debounce(unsigned int irq, int enable);
-
 /* new generic GPIO API - see Documentation/gpio.txt */
 
 #include <asm-generic/gpio.h>
@@ -114,17 +112,9 @@ extern void ep93xx_gpio_int_debounce(unsigned int irq, int enable);
  *          B0..B7  (7..15) to irq 72..79, and
  *          F0..F7 (16..24) to irq 80..87.
  */
-static inline int gpio_to_irq(unsigned gpio)
-{
-	if (gpio <= EP93XX_GPIO_LINE_MAX_IRQ)
-		return 64 + gpio;
+#define gpio_to_irq(gpio)	\
+	(((gpio) <= EP93XX_GPIO_LINE_MAX_IRQ) ? (64 + (gpio)) : -EINVAL)
 
-	return -EINVAL;
-}
-
-static inline int irq_to_gpio(unsigned irq)
-{
-	return irq - gpio_to_irq(0);
-}
+#define irq_to_gpio(irq)	((irq) - gpio_to_irq(0))
 
 #endif

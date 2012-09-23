@@ -33,7 +33,7 @@
 #include <plat/iic.h>
 
 #include <plat/s3c2410.h>
-#include <plat/s3c2440.h>
+#include <plat/s3c244x.h>
 #include <plat/clock.h>
 #include <plat/devs.h>
 #include <plat/cpu.h>
@@ -45,6 +45,8 @@
 #include <plat/udc.h>
 
 #include <sound/s3c24xx_uda134x.h>
+
+#include <linux/usb/g_hid.h> /* UDC HID Support */
 
 static struct map_desc tq2440_iodesc[] __initdata = {
 };
@@ -114,12 +116,12 @@ static struct s3c2410fb_display tq2440_lcd_cfg __initdata = {
 	.xres		= 320,
 	.yres		= 240,
 	.bpp		= 16,
-	.left_margin	= 28,	/* 28for HFPD*/
-	.right_margin	= 30,	/* 24for HBPD*/
-	.hsync_len	= 40,	/* 42for HSPW*/
-	.upper_margin	= 15,	/* 6 for VFPD*/
-	.lower_margin	= 2,	/* 2 for VBPD*/
-	.vsync_len	= 1,	/* 12for VSPW*/
+	.left_margin	= 15,	/* for HFPD*/
+	.right_margin	= 5,	/* for HBPD*/
+	.hsync_len	= 8,	/* for HSPW*/
+	.upper_margin	= 5,	/* for VFPD*/
+	.lower_margin	= 3,	/* for VBPD*/
+	.vsync_len	= 15,	/* for VSPW*/
 
 #elif defined(CONFIG_FB_S3C24X0_W320240)
 	.width		= 320,
@@ -130,12 +132,12 @@ static struct s3c2410fb_display tq2440_lcd_cfg __initdata = {
 	.xres		= 320,
 	.yres		= 240,
 	.bpp		= 16,
-	.left_margin	= 28,	/* 28for HFPD*/
-	.right_margin	= 30,	/* 24for HBPD*/
-	.hsync_len	= 40,	/* 42for HSPW*/
-	.upper_margin	= 10,	/* 6 for VFPD*/
-	.lower_margin	= 2,	/* 2 for VBPD*/
-	.vsync_len	= 1,	/* 12for VSPW*/
+	.left_margin	= 28,	/* for HFPD*/
+	.right_margin	= 24,	/* for HBPD*/
+	.hsync_len	= 42,	/* for HSPW*/
+	.upper_margin	= 6,	/* for VFPD*/
+	.lower_margin	= 2,	/* for VBPD*/
+	.vsync_len	= 12,	/* for VSPW*/
 
 #elif defined(CONFIG_FB_S3C24X0_TFT480272)
 	.width		= 480,
@@ -221,7 +223,7 @@ static struct s3c2410fb_mach_info tq2440_fb_info __initdata = {
 	.gpdup_mask	= 0xffffffff,
 #endif
 
-//	.lpcsel		= ((0xCE6) & ~7) | 1<<4,
+/*	.lpcsel		= ((0xCE6) & ~7) | 1<<4, */
 };
 
 /* DM9000 */
@@ -258,46 +260,87 @@ struct platform_device s3c_device_dm9000 = {
     }
 };
 
-/* USB Device (Gadget)*/
-static void EmbedSky_udc_pullup(enum s3c2410_udc_cmd_e cmd)
-{
-        printk(KERN_DEBUG "EmbedSky udc: pullup(%d)\n",cmd);
-	        switch (cmd)
-	        {
-	                case S3C2410_UDC_P_ENABLE :
-	                        s3c2410_gpio_setpin(S3C2410_GPG12, 1);
-	                        break;
-	                case S3C2410_UDC_P_DISABLE :
-	                        s3c2410_gpio_setpin(S3C2410_GPG12, 0);
-	                        break;
-	                case S3C2410_UDC_P_RESET :
-	                        break;
-		        default:
-	                        break;
-	        }
-}
+/* USB device UDC support */
 
-static struct s3c2410_udc_mach_info EmbedSky_udc_cfg = {
-	.udc_command		= EmbedSky_udc_pullup,
+static struct s3c2410_udc_mach_info EmbedSky_udc_cfg __initdata = {
+	.pullup_pin = S3C2410_GPG(12),
 };
 
 /* UDA1341 */
 static struct s3c24xx_uda134x_platform_data s3c24xx_uda134x_data = {
-	.l3_clk = S3C2410_GPB4,
-	.l3_data = S3C2410_GPB3,
-	.l3_mode = S3C2410_GPB2,
+	.l3_clk = S3C2410_GPB(4),
+	.l3_data = S3C2410_GPB(3),
+	.l3_mode = S3C2410_GPB(2),
 	.model = UDA134X_UDA1341,
 };
 
 static struct platform_device s3c_device_uda134x = {
-	.name = "s3c24xx_uda134x",
-	.dev = {
-		.platform_data    = &s3c24xx_uda134x_data,
+	.name 		= "s3c24xx_uda134x",
+	.id		= 0,
+	.dev 		= {
+		.platform_data = &s3c24xx_uda134x_data,
+	}
+};
+
+static struct platform_device s3c_device_uda134x_codec = {
+		.name = "uda134x-codec",
+		.id = -1,
+};
+
+/* UDC HID Keyboard support */
+static struct hidg_func_descriptor s3c_udc_hid_kbd_data = {
+	.subclass		= 0, /* No subclass */
+	.protocol		= 1, /* Keyboard */
+	.report_length		= 8,
+	.report_desc_length	= 63,
+	.report_desc		= {
+		0x05, 0x01,	/* USAGE_PAGE (Generic Desktop)	          */
+		0x09, 0x06,	/* USAGE (Keyboard)                       */
+		0xa1, 0x01,	/* COLLECTION (Application)               */
+		0x05, 0x07,	/*   USAGE_PAGE (Keyboard)                */
+		0x19, 0xe0,	/*   USAGE_MINIMUM (Keyboard LeftControl) */
+		0x29, 0xe7,	/*   USAGE_MAXIMUM (Keyboard Right GUI)   */
+		0x15, 0x00,	/*   LOGICAL_MINIMUM (0)                  */
+		0x25, 0x01,	/*   LOGICAL_MAXIMUM (1)                  */
+		0x75, 0x01,	/*   REPORT_SIZE (1)                      */
+		0x95, 0x08,	/*   REPORT_COUNT (8)                     */
+		0x81, 0x02,	/*   INPUT (Data,Var,Abs)                 */
+		0x95, 0x01,	/*   REPORT_COUNT (1)                     */
+		0x75, 0x08,	/*   REPORT_SIZE (8)                      */
+		0x81, 0x03,	/*   INPUT (Cnst,Var,Abs)                 */
+		0x95, 0x05,	/*   REPORT_COUNT (5)                     */
+		0x75, 0x01,	/*   REPORT_SIZE (1)                      */
+		0x05, 0x08,	/*   USAGE_PAGE (LEDs)                    */
+		0x19, 0x01,	/*   USAGE_MINIMUM (Num Lock)             */
+		0x29, 0x05,	/*   USAGE_MAXIMUM (Kana)                 */
+		0x91, 0x02,	/*   OUTPUT (Data,Var,Abs)                */
+		0x95, 0x01,	/*   REPORT_COUNT (1)                     */
+		0x75, 0x03,	/*   REPORT_SIZE (3)                      */
+		0x91, 0x03,	/*   OUTPUT (Cnst,Var,Abs)                */
+		0x95, 0x06,	/*   REPORT_COUNT (6)                     */
+		0x75, 0x08,	/*   REPORT_SIZE (8)                      */
+		0x15, 0x00,	/*   LOGICAL_MINIMUM (0)                  */
+		0x25, 0x65,	/*   LOGICAL_MAXIMUM (101)                */
+		0x05, 0x07,	/*   USAGE_PAGE (Keyboard)                */
+		0x19, 0x00,	/*   USAGE_MINIMUM (Reserved)             */
+		0x29, 0x65,	/*   USAGE_MAXIMUM (Keyboard Application) */
+		0x81, 0x00,	/*   INPUT (Data,Ary,Abs)                 */
+		0xc0		/* END_COLLECTION                         */
+	}
+};
+
+static struct platform_device s3c_udc_hid_kbd = {
+	.name		= "hidg",
+	.id		= 0,
+	.num_resources	= 0,
+	.resource	= 0,
+	.dev 		= {
+		.platform_data	= &s3c_udc_hid_kbd_data,
 	}
 };
 
 static struct platform_device *tq2440_devices[] __initdata = {
-	&s3c_device_usb,
+	&s3c_device_ohci,
 	&s3c_device_lcd,
 	&s3c_device_wdt,
 	&s3c_device_i2c0,
@@ -306,6 +349,9 @@ static struct platform_device *tq2440_devices[] __initdata = {
 	&s3c_device_dm9000,
 	&s3c_device_usbgadget,
 	&s3c_device_uda134x,
+	&s3c_device_uda134x_codec,
+	&samsung_asoc_dma,
+	&s3c_udc_hid_kbd,
 };
 
 static void __init tq2440_map_io(void)
@@ -322,17 +368,13 @@ static void __init tq2440_machine_init(void)
 
 	platform_add_devices(tq2440_devices, ARRAY_SIZE(tq2440_devices));
 	EmbedSky_machine_init();
-	s3c2410_gpio_setpin(S3C2410_GPG12, 0);
-        s3c2410_gpio_cfgpin(S3C2410_GPG12, S3C2410_GPIO_OUTPUT);
 	s3c24xx_udc_set_platdata(&EmbedSky_udc_cfg);
 }
 
 MACHINE_START(S3C2440, "TQ2440")
-	.phys_io		= S3C2410_PA_UART,
-	.io_pg_offst	= (((u32)S3C24XX_VA_UART) >> 18) & 0xfffc,
 	.boot_params	= S3C2410_SDRAM_PA + 0x100,
 
-	.init_irq		= s3c24xx_init_irq,
+	.init_irq	= s3c24xx_init_irq,
 	.map_io		= tq2440_map_io,
 	.init_machine	= tq2440_machine_init,
 	.timer		= &s3c24xx_timer,

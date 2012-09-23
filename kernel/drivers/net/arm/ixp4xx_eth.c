@@ -30,8 +30,12 @@
 #include <linux/etherdevice.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/net_tstamp.h>
 #include <linux/phy.h>
 #include <linux/platform_device.h>
+#include <linux/ptp_classify.h>
+#include <linux/slab.h>
+#include <mach/ixp46x_ts.h>
 #include <mach/npe.h>
 #include <mach/qmgr.h>
 
@@ -65,6 +69,10 @@
 #define TX_QUEUE(port_id)	(NPE_ID(port_id) + 23)
 #define RXFREE_QUEUE(port_id)	(NPE_ID(port_id) + 26)
 #define TXDONE_QUEUE		31
+
+#define PTP_SLAVE_MODE		1
+#define PTP_MASTER_MODE		2
+#define PORT2CHANNEL(p)		NPE_ID(p->id)
 
 /* TX Control Registers */
 #define TX_CNTRL0_TX_EN		0x01
@@ -170,6 +178,8 @@ struct port {
 	int id;			/* logical port ID */
 	int speed, duplex;
 	u8 firmware[4];
+	int hwts_tx_en;
+	int hwts_rx_en;
 };
 
 /* NPE message structure */
@@ -240,11 +250,177 @@ static inline void memcpy_swab32(u32 *dest, u32 *src, int cnt)
 
 static spinlock_t mdio_lock;
 static struct eth_regs __iomem *mdio_regs; /* mdio command and status only */
-struct mii_bus *mdio_bus;
+static struct mii_bus *mdio_bus;
 static int ports_open;
 static struct port *npe_port_tab[MAX_NPES];
 static struct dma_pool *dma_pool;
 
+static struct sock_filter ptp_filter[] = {
+	PTP_FILTER
+};
+
+static int ixp_ptp_match(struct sk_buff *skb, u16 uid_hi, u32 uid_lo, u16 seqid)
+{
+	u8 *data = skb->data;
+	unsigned int offset;
+	u16 *hi, *id;
+	u32 lo;
+
+	if (sk_run_filter(skb, ptp_filter) != PTP_CLASS_V1_IPV4)
+		return 0;
+
+	offset = ETH_HLEN + IPV4_HLEN(data) + UDP_HLEN;
+
+	if (skb->len < offset + OFF_PTP_SEQUENCE_ID + sizeof(seqid))
+		return 0;
+
+	hi = (u16 *)(data + offset + OFF_PTP_SOURCE_UUID);
+	id = (u16 *)(data + offset + OFF_PTP_SEQUENCE_ID);
+
+	memcpy(&lo, &hi[1], sizeof(lo));
+
+	return (uid_hi == ntohs(*hi) &&
+		uid_lo == ntohl(lo) &&
+		seqid  == ntohs(*id));
+}
+
+static void ixp_rx_timestamp(struct port *port, struct sk_buff *skb)
+{
+	struct skb_shared_hwtstamps *shhwtstamps;
+	struct ixp46x_ts_regs *regs;
+	u64 ns;
+	u32 ch, hi, lo, val;
+	u16 uid, seq;
+
+	if (!port->hwts_rx_en)
+		return;
+
+	ch = PORT2CHANNEL(port);
+
+	regs = (struct ixp46x_ts_regs __iomem *) IXP4XX_TIMESYNC_BASE_VIRT;
+
+	val = __raw_readl(&regs->channel[ch].ch_event);
+
+	if (!(val & RX_SNAPSHOT_LOCKED))
+		return;
+
+	lo = __raw_readl(&regs->channel[ch].src_uuid_lo);
+	hi = __raw_readl(&regs->channel[ch].src_uuid_hi);
+
+	uid = hi & 0xffff;
+	seq = (hi >> 16) & 0xffff;
+
+	if (!ixp_ptp_match(skb, htons(uid), htonl(lo), htons(seq)))
+		goto out;
+
+	lo = __raw_readl(&regs->channel[ch].rx_snap_lo);
+	hi = __raw_readl(&regs->channel[ch].rx_snap_hi);
+	ns = ((u64) hi) << 32;
+	ns |= lo;
+	ns <<= TICKS_NS_SHIFT;
+
+	shhwtstamps = skb_hwtstamps(skb);
+	memset(shhwtstamps, 0, sizeof(*shhwtstamps));
+	shhwtstamps->hwtstamp = ns_to_ktime(ns);
+out:
+	__raw_writel(RX_SNAPSHOT_LOCKED, &regs->channel[ch].ch_event);
+}
+
+static void ixp_tx_timestamp(struct port *port, struct sk_buff *skb)
+{
+	struct skb_shared_hwtstamps shhwtstamps;
+	struct ixp46x_ts_regs *regs;
+	struct skb_shared_info *shtx;
+	u64 ns;
+	u32 ch, cnt, hi, lo, val;
+
+	shtx = skb_shinfo(skb);
+	if (unlikely(shtx->tx_flags & SKBTX_HW_TSTAMP && port->hwts_tx_en))
+		shtx->tx_flags |= SKBTX_IN_PROGRESS;
+	else
+		return;
+
+	ch = PORT2CHANNEL(port);
+
+	regs = (struct ixp46x_ts_regs __iomem *) IXP4XX_TIMESYNC_BASE_VIRT;
+
+	/*
+	 * This really stinks, but we have to poll for the Tx time stamp.
+	 * Usually, the time stamp is ready after 4 to 6 microseconds.
+	 */
+	for (cnt = 0; cnt < 100; cnt++) {
+		val = __raw_readl(&regs->channel[ch].ch_event);
+		if (val & TX_SNAPSHOT_LOCKED)
+			break;
+		udelay(1);
+	}
+	if (!(val & TX_SNAPSHOT_LOCKED)) {
+		shtx->tx_flags &= ~SKBTX_IN_PROGRESS;
+		return;
+	}
+
+	lo = __raw_readl(&regs->channel[ch].tx_snap_lo);
+	hi = __raw_readl(&regs->channel[ch].tx_snap_hi);
+	ns = ((u64) hi) << 32;
+	ns |= lo;
+	ns <<= TICKS_NS_SHIFT;
+
+	memset(&shhwtstamps, 0, sizeof(shhwtstamps));
+	shhwtstamps.hwtstamp = ns_to_ktime(ns);
+	skb_tstamp_tx(skb, &shhwtstamps);
+
+	__raw_writel(TX_SNAPSHOT_LOCKED, &regs->channel[ch].ch_event);
+}
+
+static int hwtstamp_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
+{
+	struct hwtstamp_config cfg;
+	struct ixp46x_ts_regs *regs;
+	struct port *port = netdev_priv(netdev);
+	int ch;
+
+	if (copy_from_user(&cfg, ifr->ifr_data, sizeof(cfg)))
+		return -EFAULT;
+
+	if (cfg.flags) /* reserved for future extensions */
+		return -EINVAL;
+
+	ch = PORT2CHANNEL(port);
+	regs = (struct ixp46x_ts_regs __iomem *) IXP4XX_TIMESYNC_BASE_VIRT;
+
+	switch (cfg.tx_type) {
+	case HWTSTAMP_TX_OFF:
+		port->hwts_tx_en = 0;
+		break;
+	case HWTSTAMP_TX_ON:
+		port->hwts_tx_en = 1;
+		break;
+	default:
+		return -ERANGE;
+	}
+
+	switch (cfg.rx_filter) {
+	case HWTSTAMP_FILTER_NONE:
+		port->hwts_rx_en = 0;
+		break;
+	case HWTSTAMP_FILTER_PTP_V1_L4_SYNC:
+		port->hwts_rx_en = PTP_SLAVE_MODE;
+		__raw_writel(0, &regs->channel[ch].ch_control);
+		break;
+	case HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ:
+		port->hwts_rx_en = PTP_MASTER_MODE;
+		__raw_writel(MASTER_MODE, &regs->channel[ch].ch_control);
+		break;
+	default:
+		return -ERANGE;
+	}
+
+	/* Clear out any old time stamps. */
+	__raw_writel(TX_SNAPSHOT_LOCKED | RX_SNAPSHOT_LOCKED,
+		     &regs->channel[ch].ch_event);
+
+	return copy_to_user(ifr->ifr_data, &cfg, sizeof(cfg)) ? -EFAULT : 0;
+}
 
 static int ixp4xx_mdio_cmd(struct mii_bus *bus, int phy_id, int location,
 			   int write, u16 cmd)
@@ -322,7 +498,7 @@ static int ixp4xx_mdio_write(struct mii_bus *bus, int phy_id, int location,
 	ret = ixp4xx_mdio_cmd(bus, phy_id, location, 1, val);
 	spin_unlock_irqrestore(&mdio_lock, flags);
 #if DEBUG_MDIO
-	printk(KERN_DEBUG "%s #%i: MII read [%i] <- 0x%X, err = %i\n",
+	printk(KERN_DEBUG "%s #%i: MII write [%i] <- 0x%X, err = %i\n",
 	       bus->name, phy_id, location, val, ret);
 #endif
 	return ret;
@@ -456,7 +632,8 @@ static inline void queue_put_desc(unsigned int queue, u32 phys,
 	debug_desc(phys, desc);
 	BUG_ON(phys & 0x1F);
 	qmgr_put_entry(queue, phys);
-	BUG_ON(qmgr_stat_overflow(queue));
+	/* Don't check for queue overflow here, we've allocated sufficient
+	   length and queues >= 32 don't support this check anyway. */
 }
 
 
@@ -512,8 +689,8 @@ static int eth_poll(struct napi_struct *napi, int budget)
 #endif
 			napi_complete(napi);
 			qmgr_enable_irq(rxq);
-			if (!qmgr_stat_empty(rxq) &&
-			    napi_reschedule(napi)) {
+			if (!qmgr_stat_below_low_watermark(rxq) &&
+			    napi_reschedule(napi)) { /* not empty again */
 #if DEBUG_RX
 				printk(KERN_DEBUG "%s: eth_poll"
 				       " napi_reschedule successed\n",
@@ -561,8 +738,8 @@ static int eth_poll(struct napi_struct *napi, int budget)
 		dma_unmap_single(&dev->dev, desc->data - NET_IP_ALIGN,
 				 RX_BUFF_SIZE, DMA_FROM_DEVICE);
 #else
-		dma_sync_single(&dev->dev, desc->data - NET_IP_ALIGN,
-				RX_BUFF_SIZE, DMA_FROM_DEVICE);
+		dma_sync_single_for_cpu(&dev->dev, desc->data - NET_IP_ALIGN,
+					RX_BUFF_SIZE, DMA_FROM_DEVICE);
 		memcpy_swab32((u32 *)skb->data, (u32 *)port->rx_buff_tab[n],
 			      ALIGN(NET_IP_ALIGN + desc->pkt_len, 4) / 4);
 #endif
@@ -571,6 +748,7 @@ static int eth_poll(struct napi_struct *napi, int budget)
 
 		debug_pkt(dev, "eth_poll", skb->data, skb->len);
 
+		ixp_rx_timestamp(port, skb);
 		skb->protocol = eth_type_trans(skb, dev);
 		dev->stats.rx_packets++;
 		dev->stats.rx_bytes += skb->len;
@@ -630,9 +808,9 @@ static void eth_txdone_irq(void *unused)
 			port->tx_buff_tab[n_desc] = NULL;
 		}
 
-		start = qmgr_stat_empty(port->plat->txreadyq);
+		start = qmgr_stat_below_low_watermark(port->plat->txreadyq);
 		queue_put_desc(port->plat->txreadyq, phys, desc);
-		if (start) {
+		if (start) { /* TX-ready queue was empty */
 #if DEBUG_TX
 			printk(KERN_DEBUG "%s: eth_txdone_irq xmit ready\n",
 			       port->netdev->name);
@@ -677,14 +855,12 @@ static int eth_xmit(struct sk_buff *skb, struct net_device *dev)
 		return NETDEV_TX_OK;
 	}
 	memcpy_swab32(mem, (u32 *)((int)skb->data & ~3), bytes / 4);
-	dev_kfree_skb(skb);
 #endif
 
 	phys = dma_map_single(&dev->dev, mem, bytes, DMA_TO_DEVICE);
 	if (dma_mapping_error(&dev->dev, phys)) {
-#ifdef __ARMEB__
 		dev_kfree_skb(skb);
-#else
+#ifndef __ARMEB__
 		kfree(mem);
 #endif
 		dev->stats.tx_dropped++;
@@ -706,15 +882,15 @@ static int eth_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* NPE firmware pads short frames with zeros internally */
 	wmb();
 	queue_put_desc(TX_QUEUE(port->id), tx_desc_phys(port, n), desc);
-	dev->trans_start = jiffies;
 
-	if (qmgr_stat_empty(txreadyq)) {
+	if (qmgr_stat_below_low_watermark(txreadyq)) { /* empty */
 #if DEBUG_TX
 		printk(KERN_DEBUG "%s: eth_xmit queue full\n", dev->name);
 #endif
 		netif_stop_queue(dev);
 		/* we could miss TX ready interrupt */
-		if (!qmgr_stat_empty(txreadyq)) {
+		/* really empty in fact */
+		if (!qmgr_stat_below_low_watermark(txreadyq)) {
 #if DEBUG_TX
 			printk(KERN_DEBUG "%s: eth_xmit ready again\n",
 			       dev->name);
@@ -726,6 +902,13 @@ static int eth_xmit(struct sk_buff *skb, struct net_device *dev)
 #if DEBUG_TX
 	printk(KERN_DEBUG "%s: eth_xmit end\n", dev->name);
 #endif
+
+	ixp_tx_timestamp(port, skb);
+	skb_tx_timestamp(skb);
+
+#ifndef __ARMEB__
+	dev_kfree_skb(skb);
+#endif
 	return NETDEV_TX_OK;
 }
 
@@ -733,22 +916,36 @@ static int eth_xmit(struct sk_buff *skb, struct net_device *dev)
 static void eth_set_mcast_list(struct net_device *dev)
 {
 	struct port *port = netdev_priv(dev);
-	struct dev_mc_list *mclist = dev->mc_list;
+	struct netdev_hw_addr *ha;
 	u8 diffs[ETH_ALEN], *addr;
-	int cnt = dev->mc_count, i;
+	int i;
+	static const u8 allmulti[] = { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
-	if ((dev->flags & IFF_PROMISC) || !mclist || !cnt) {
+	if (dev->flags & IFF_ALLMULTI) {
+		for (i = 0; i < ETH_ALEN; i++) {
+			__raw_writel(allmulti[i], &port->regs->mcast_addr[i]);
+			__raw_writel(allmulti[i], &port->regs->mcast_mask[i]);
+		}
+		__raw_writel(DEFAULT_RX_CNTRL0 | RX_CNTRL0_ADDR_FLTR_EN,
+			&port->regs->rx_control[0]);
+		return;
+	}
+
+	if ((dev->flags & IFF_PROMISC) || netdev_mc_empty(dev)) {
 		__raw_writel(DEFAULT_RX_CNTRL0 & ~RX_CNTRL0_ADDR_FLTR_EN,
 			     &port->regs->rx_control[0]);
 		return;
 	}
 
 	memset(diffs, 0, ETH_ALEN);
-	addr = mclist->dmi_addr; /* first MAC address */
 
-	while (--cnt && (mclist = mclist->next))
+	addr = NULL;
+	netdev_for_each_mc_addr(ha, dev) {
+		if (!addr)
+			addr = ha->addr; /* first MAC address */
 		for (i = 0; i < ETH_ALEN; i++)
-			diffs[i] |= addr[i] ^ mclist->dmi_addr[i];
+			diffs[i] |= addr[i] ^ ha->addr[i];
+	}
 
 	for (i = 0; i < ETH_ALEN; i++) {
 		__raw_writel(addr[i], &port->regs->mcast_addr[i]);
@@ -766,7 +963,11 @@ static int eth_ioctl(struct net_device *dev, struct ifreq *req, int cmd)
 
 	if (!netif_running(dev))
 		return -EINVAL;
-	return phy_mii_ioctl(port->phydev, if_mii(req), cmd);
+
+	if (cpu_is_ixp46x() && cmd == SIOCSHWTSTAMP)
+		return hwtstamp_ioctl(dev, req, cmd);
+
+	return phy_mii_ioctl(port->phydev, req, cmd);
 }
 
 /* ethtool support */
@@ -800,7 +1001,7 @@ static int ixp4xx_nway_reset(struct net_device *dev)
 	return phy_start_aneg(port->phydev);
 }
 
-static struct ethtool_ops ixp4xx_ethtool_ops = {
+static const struct ethtool_ops ixp4xx_ethtool_ops = {
 	.get_drvinfo = ixp4xx_get_drvinfo,
 	.get_settings = ixp4xx_get_settings,
 	.set_settings = ixp4xx_set_settings,
@@ -814,29 +1015,29 @@ static int request_queues(struct port *port)
 	int err;
 
 	err = qmgr_request_queue(RXFREE_QUEUE(port->id), RX_DESCS, 0, 0,
-			    "%s:RX-free", port->netdev->name);
+				 "%s:RX-free", port->netdev->name);
 	if (err)
 		return err;
 
 	err = qmgr_request_queue(port->plat->rxq, RX_DESCS, 0, 0,
-			    "%s:RX", port->netdev->name);
+				 "%s:RX", port->netdev->name);
 	if (err)
 		goto rel_rxfree;
 
 	err = qmgr_request_queue(TX_QUEUE(port->id), TX_DESCS, 0, 0,
-			    "%s:TX", port->netdev->name);
+				 "%s:TX", port->netdev->name);
 	if (err)
 		goto rel_rx;
 
 	err = qmgr_request_queue(port->plat->txreadyq, TX_DESCS, 0, 0,
-			    "%s:TX-ready", port->netdev->name);
+				 "%s:TX-ready", port->netdev->name);
 	if (err)
 		goto rel_tx;
 
 	/* TX-done queue handles skbs sent out by the NPEs */
 	if (!ports_open) {
 		err = qmgr_request_queue(TXDONE_QUEUE, TXDONE_QUEUE_LEN, 0, 0,
-				    "%s:TX-done", DRV_NAME);
+					 "%s:TX-done", DRV_NAME);
 		if (err)
 			goto rel_txready;
 	}
@@ -1151,8 +1352,13 @@ static int __devinit eth_init_one(struct platform_device *pdev)
 	struct net_device *dev;
 	struct eth_plat_info *plat = pdev->dev.platform_data;
 	u32 regs_phys;
-	char phy_id[BUS_ID_SIZE];
+	char phy_id[MII_BUS_ID_SIZE + 3];
 	int err;
+
+	if (ptp_filter_init(ptp_filter, ARRAY_SIZE(ptp_filter))) {
+		pr_err("ixp4xx_eth: bad ptp filter\n");
+		return -EINVAL;
+	}
 
 	if (!(dev = alloc_etherdev(sizeof(struct port))))
 		return -ENOMEM;
@@ -1209,11 +1415,13 @@ static int __devinit eth_init_one(struct platform_device *pdev)
 	__raw_writel(DEFAULT_CORE_CNTRL, &port->regs->core_control);
 	udelay(50);
 
-	snprintf(phy_id, BUS_ID_SIZE, PHY_ID_FMT, "0", plat->phy);
+	snprintf(phy_id, MII_BUS_ID_SIZE + 3, PHY_ID_FMT, "0", plat->phy);
 	port->phydev = phy_connect(dev, phy_id, &ixp4xx_adjust_link, 0,
 				   PHY_INTERFACE_MODE_MII);
-	if ((err = IS_ERR(port->phydev)))
+	if (IS_ERR(port->phydev)) {
+		err = PTR_ERR(port->phydev);
 		goto err_free_mem;
+	}
 
 	port->phydev->irq = PHY_POLL;
 

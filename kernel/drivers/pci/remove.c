@@ -32,8 +32,6 @@ static void pci_stop_dev(struct pci_dev *dev)
 
 static void pci_destroy_dev(struct pci_dev *dev)
 {
-	pci_stop_dev(dev);
-
 	/* Remove the device from the device lists, and prevent any further
 	 * list accesses from this device */
 	down_write(&pci_bus_sem);
@@ -75,8 +73,6 @@ void pci_remove_bus(struct pci_bus *pci_bus)
 		return;
 
 	pci_remove_legacy_files(pci_bus);
-	device_remove_file(&pci_bus->dev, &dev_attr_cpuaffinity);
-	device_remove_file(&pci_bus->dev, &dev_attr_cpulistaffinity);
 	device_unregister(&pci_bus->dev);
 }
 EXPORT_SYMBOL(pci_remove_bus);

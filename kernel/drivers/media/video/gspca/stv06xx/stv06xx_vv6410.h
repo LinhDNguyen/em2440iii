@@ -157,8 +157,8 @@
 /* Audio Amplifier Setup Register */
 #define VV6410_AT1			0x79
 
-#define VV6410_HFLIP 			(1 << 3)
-#define VV6410_VFLIP 			(1 << 4)
+#define VV6410_HFLIP			(1 << 3)
+#define VV6410_VFLIP			(1 << 4)
 
 #define VV6410_LOW_POWER_MODE		(1 << 0)
 #define VV6410_SOFT_RESET		(1 << 2)
@@ -172,6 +172,8 @@
 
 #define VV6410_SUBSAMPLE		0x01
 #define VV6410_CROP_TO_QVGA		0x02
+
+#define VV6410_CIF_LINELENGTH		415
 
 static int vv6410_probe(struct sd *sd);
 static int vv6410_start(struct sd *sd);
@@ -187,12 +189,18 @@ static int vv6410_get_vflip(struct gspca_dev *gspca_dev, __s32 *val);
 static int vv6410_set_vflip(struct gspca_dev *gspca_dev, __s32 val);
 static int vv6410_get_analog_gain(struct gspca_dev *gspca_dev, __s32 *val);
 static int vv6410_set_analog_gain(struct gspca_dev *gspca_dev, __s32 val);
+static int vv6410_get_exposure(struct gspca_dev *gspca_dev, __s32 *val);
+static int vv6410_set_exposure(struct gspca_dev *gspca_dev, __s32 val);
 
 const struct stv06xx_sensor stv06xx_sensor_vv6410 = {
 	.name = "ST VV6410",
 	.i2c_flush = 5,
 	.i2c_addr = 0x20,
 	.i2c_len = 1,
+	/* FIXME (see if we can lower packet_size-s, needs testing, and also
+	   adjusting framerate when the bandwidth gets lower) */
+	.min_packet_size = { 1023 },
+	.max_packet_size = { 1023 },
 	.init = vv6410_init,
 	.probe = vv6410_probe,
 	.start = vv6410_start,
@@ -216,18 +224,14 @@ static const u8 x1536[] = {	/* 0x1536 - 0x153b */
 	0x02, 0x00, 0x60, 0x01, 0x20, 0x01
 };
 
-static const u8 x15c1[] = {	/* 0x15c1 - 0x15c2 */
-	0xff, 0x03 /* Output word 0x03ff = 1023 (ISO size) */
-};
-
 static const struct stv_init stv_bridge_init[] = {
 	/* This reg is written twice. Some kind of reset? */
 	{NULL,  0x1620, 0x80},
 	{NULL,  0x1620, 0x00},
+	{NULL,  0x1443, 0x00},
 	{NULL,  0x1423, 0x04},
 	{x1500, 0x1500, ARRAY_SIZE(x1500)},
 	{x1536, 0x1536, ARRAY_SIZE(x1536)},
-	{x15c1, 0x15c1, ARRAY_SIZE(x15c1)}
 };
 
 static const u8 vv6410_sensor_init[][2] = {
@@ -242,12 +246,6 @@ static const u8 vv6410_sensor_init[][2] = {
 	/* Pre-clock generator divide off */
 	{VV6410_DATAFORMAT,	BIT(7) | BIT(0)},
 
-	/* Exposure registers */
-	{VV6410_FINEH,		VV6410_FINE_EXPOSURE >> 8},
-	{VV6410_FINEL,		VV6410_FINE_EXPOSURE & 0xff},
-	{VV6410_COARSEH,	VV6410_COARSE_EXPOSURE >> 8},
-	{VV6410_COARSEL,	VV6410_COARSE_EXPOSURE & 0xff},
-	{VV6410_ANALOGGAIN,	0xf0 | VV6410_DEFAULT_GAIN},
 	{VV6410_CLKDIV,		VV6410_CLK_DIV_2},
 
 	/* System registers */

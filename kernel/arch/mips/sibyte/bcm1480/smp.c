@@ -20,6 +20,7 @@
 #include <linux/delay.h>
 #include <linux/smp.h>
 #include <linux/kernel_stat.h>
+#include <linux/sched.h>
 
 #include <asm/mmu_context.h>
 #include <asm/io.h>
@@ -82,11 +83,12 @@ static void bcm1480_send_ipi_single(int cpu, unsigned int action)
 	__raw_writeq((((u64)action)<< 48), mailbox_0_set_regs[cpu]);
 }
 
-static void bcm1480_send_ipi_mask(cpumask_t mask, unsigned int action)
+static void bcm1480_send_ipi_mask(const struct cpumask *mask,
+				  unsigned int action)
 {
 	unsigned int i;
 
-	for_each_cpu_mask(i, mask)
+	for_each_cpu(i, mask)
 		bcm1480_send_ipi_single(i, action);
 }
 
@@ -188,10 +190,8 @@ void bcm1480_mailbox_interrupt(void)
 	/* Clear the mailbox to clear the interrupt */
 	__raw_writeq(((u64)action)<<48, mailbox_0_clear_regs[cpu]);
 
-	/*
-	 * Nothing to do for SMP_RESCHEDULE_YOURSELF; returning from the
-	 * interrupt will do the reschedule for us
-	 */
+	if (action & SMP_RESCHEDULE_YOURSELF)
+		scheduler_ipi();
 
 	if (action & SMP_CALL_FUNCTION)
 		smp_call_function_interrupt();
