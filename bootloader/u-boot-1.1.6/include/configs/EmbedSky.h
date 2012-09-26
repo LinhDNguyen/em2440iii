@@ -211,9 +211,9 @@
 #define CONFIG_BOOTDELAY		3
 
 #if CONFIG_128MB_SDRAM
-#define CONFIG_BOOTARGS		"noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0 mem=128M"
+#define CONFIG_BOOTARGS		"noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0 mem=128M panic=10"
 #else
-#define CONFIG_BOOTARGS		"noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0"
+#define CONFIG_BOOTARGS		"noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0 panic=10"
 #endif
 #define CONFIG_ETHADDR			0a:1b:2c:3d:4e:5f
 #define CONFIG_NETMASK			255.255.255.0
@@ -232,7 +232,7 @@
  * Miscellaneous configurable options
  */
 #define	CFG_LONGHELP				/* undef to save memory		*/
-#define	CFG_PROMPT			"Boardcon> "	/* Monitor Command Prompt	*/
+#define	CFG_PROMPT			"u-boot> "	/* Monitor Command Prompt	*/
 #define	CFG_CBSIZE			256		/* Console I/O Buffer Size	*/
 #define	CFG_PBSIZE			(CFG_CBSIZE+sizeof(CFG_PROMPT)+16) /* Print Buffer Size */
 #define	CFG_MAXARGS			16		/* max number of command args	*/
@@ -327,5 +327,14 @@
 #define CFG_NAND_BASE			0
 #define CFG_MAX_NAND_DEVICE		1
 #define NAND_MAX_CHIPS			1
+
+/*------------------------------------------------------------------------
+ * EXTRA environment variables
+ * ---------------------------------------------------------------------*/
+#define CONFIG_EXTRA_ENV_SETTINGS \
+	"newuboot=tftp 0x30000000 u-boot.bin; nand erase bios; nand write.jffs2 0x30000000 bios $(filesize)\0" \
+	"newkernel=tftp 0x30000000 zImage; nand erase kernel; nand write.jffs2 0x30000000 kernel $(filesize)\0" \
+	"newrootfs=tftp 0x30000000 root_qt2.2.0_64MB.bin; nand erase root; nand write.yaffs 0x30000000 root $(filesize)\0" \
+	"newrootfs2=tftp 0x30000000 rootfs.bin; nand erase root; nand write.yaffs 0x30000000 root $(filesize)\0"
 
 #endif	/* __CONFIG_H */

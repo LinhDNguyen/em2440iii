@@ -120,8 +120,8 @@ void param_menu_shell(void)
 				sprintf(cmd_buf, "setenv bootargs noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0 mem=128M");
 				printf("bootargs: noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0 mem=128M\n");
 			#else
-				sprintf(cmd_buf, "setenv bootargs noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0");
-				printf("bootargs: noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0\n");
+				sprintf(cmd_buf, "setenv bootargs noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0 panic=5");
+				printf("bootargs: noinitrd root=/dev/mtdblock2 init=/linuxrc console=ttySAC0 panic=5\n");
 			#endif
 
 				run_command(cmd_buf, 0);

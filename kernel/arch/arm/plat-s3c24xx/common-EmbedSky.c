@@ -57,7 +57,7 @@ static struct mtd_partition EmbedSky_default_nand_part[] = {
 	[2] = {
 		.name	= "Boardcon_Board_yaffs2",
 		.offset	= 0x00400000,
-		.size	= 0x03BF8000,
+		.size	= 0x03AF8000,
 	}
 #elif	defined(CONFIG_Boardcon_128MB_NAND)
 	[0] = {

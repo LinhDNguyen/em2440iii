@@ -75,3 +75,4 @@ bootloader/u-boot-1.1.6/tools/mkimage
 bootloader/u-boot-1.1.6/u-boot
 bootloader/u-boot-1.1.6/u-boot.map
 bootloader/u-boot-1.1.6/u-boot.srec
+tmp

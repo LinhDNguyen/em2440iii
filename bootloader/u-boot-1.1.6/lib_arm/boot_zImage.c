@@ -193,7 +193,7 @@ int boot_zImage(ulong from, size_t size)
 
 int do_boot_zImage (cmd_tbl_t *cmdtp, int flag, int argc, char *argv[])
 {
-	boot_zImage(0x200000,0x200000);
+	boot_zImage(0x200000,0x300000);
 	return 0;
 }
 
